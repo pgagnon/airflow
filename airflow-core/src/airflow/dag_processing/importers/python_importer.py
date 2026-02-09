@@ -66,14 +66,17 @@ def _timeout(seconds: float = 1, error_message: str = "Timeout"):
 
     try:
         try:
-            signal.signal(signal.SIGALRM, handle_timeout)
-            signal.setitimer(signal.ITIMER_REAL, seconds)
+            if sys.platform != "win32":
+                signal.signal(signal.SIGALRM, handle_timeout)
+                signal.setitimer(signal.ITIMER_REAL, seconds)
+            # On Windows, SIGALRM/setitimer don't exist; DAG parsing timeout is not enforced.
         except ValueError:
             log.warning("timeout can't be used in the current context", exc_info=True)
         yield
     finally:
-        with contextlib.suppress(ValueError):
-            signal.setitimer(signal.ITIMER_REAL, 0)
+        if sys.platform != "win32":
+            with contextlib.suppress(ValueError):
+                signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 class PythonDagImporter(AbstractDagImporter):

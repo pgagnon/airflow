@@ -868,9 +868,12 @@ def startup() -> tuple[RuntimeTaskInstance, Context, Logger]:
             raise RuntimeError(f"Unhandled startup message {type(msg)} {msg}")
 
     # setproctitle causes issue on Mac OS: https://github.com/benoitc/gunicorn/issues/3021
+    # setproctitle is also not available on Windows
     os_type = sys.platform
     if os_type == "darwin":
         log.debug("Mac OS detected, skipping setproctitle")
+    elif os_type == "win32":
+        log.debug("Windows detected, skipping setproctitle")
     else:
         from setproctitle import setproctitle
 
@@ -890,7 +893,16 @@ def startup() -> tuple[RuntimeTaskInstance, Context, Logger]:
     )
 
     if os.environ.get("_AIRFLOW__REEXECUTED_PROCESS") != "1" and run_as_user and run_as_user != getuser():
-        # enters here for re-exec process
+        # User impersonation via run_as_user is not supported on Windows
+        if sys.platform == "win32":
+            raise AirflowException(
+                f"User impersonation via 'run_as_user={run_as_user}' is not supported on Windows. "
+                "This feature requires Unix sudo command which is not available on Windows. "
+                "Consider running the Airflow worker service as the desired user instead, "
+                "or configure Windows Task Scheduler with 'Run as user' settings."
+            )
+
+        # enters here for re-exec process (Unix only)
         os.environ["_AIRFLOW__REEXECUTED_PROCESS"] = "1"
         # store startup message in environment for re-exec process
         os.environ["_AIRFLOW__STARTUP_MSG"] = msg.model_dump_json()
@@ -1156,7 +1168,10 @@ def run(
 
         ti.task.on_kill()
 
-    signal.signal(signal.SIGTERM, _on_term)
+    if sys.platform != "win32":
+        signal.signal(signal.SIGTERM, _on_term)
+    # On Windows, TerminateProcess() bypasses signal handlers.
+    # ti.task.on_kill() won't be called during forced termination.
 
     msg: ToSupervisor | None = None
     state: TaskInstanceState
@@ -1809,5 +1824,106 @@ def reinit_supervisor_comms() -> None:
         print("Unable to re-configure logging after sudo, we didn't get an FD", file=sys.stderr)
 
 
+def _windows_child_main():
+    """
+    Entry point for Windows child processes spawned by the supervisor.
+
+    On Windows, we can't use fork(), so the supervisor spawns a new Python process
+    and passes socket data via stdin. This function:
+    1. Reads the length-prefixed JSON socket data from stdin
+    2. Recreates the sockets using socket.fromshare()
+    3. Sets up stdout/stderr to use those sockets
+    4. Runs the normal task execution flow
+    """
+    import base64
+    import io
+    import json
+    import socket as socket_module
+
+    from airflow.sdk.execution_time.supervisor import block_orm_access
+
+    # Read socket data length (4 bytes, big-endian)
+    stdin_binary = sys.stdin.buffer if hasattr(sys.stdin, "buffer") else sys.stdin
+    len_bytes = stdin_binary.read(4)
+    if len(len_bytes) != 4:
+        print("Failed to read socket data length from stdin", file=sys.stderr)
+        sys.exit(125)
+
+    length = int.from_bytes(len_bytes, byteorder="big")
+
+    # Read the JSON socket data
+    socket_json = stdin_binary.read(length)
+    if len(socket_json) != length:
+        print(f"Failed to read complete socket data: expected {length}, got {len(socket_json)}", file=sys.stderr)
+        sys.exit(125)
+
+    try:
+        socket_data = json.loads(socket_json.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse socket data: {e}", file=sys.stderr)
+        sys.exit(125)
+
+    # Recreate sockets from shared data
+    try:
+        requests_sock = socket_module.fromshare(base64.b64decode(socket_data["requests"]))
+        stdout_sock = socket_module.fromshare(base64.b64decode(socket_data["stdout"]))
+        stderr_sock = socket_module.fromshare(base64.b64decode(socket_data["stderr"]))
+        logs_sock = socket_module.fromshare(base64.b64decode(socket_data["logs"]))
+    except Exception as e:
+        print(f"Failed to recreate sockets: {e}", file=sys.stderr)
+        sys.exit(125)
+
+    # Set up stdout/stderr to use the sockets
+    # We create TextIOWrapper around the socket's makefile to get proper text I/O
+    sys.stdout = io.TextIOWrapper(
+        stdout_sock.makefile("wb", buffering=0),
+        line_buffering=True,
+    )
+    sys.stderr = io.TextIOWrapper(
+        stderr_sock.makefile("wb", buffering=0),
+        line_buffering=True,
+    )
+
+    # Set up logging over the logs socket
+    from airflow.sdk.log import configure_logging, reset_logging
+
+    reset_logging()
+    log_io = logs_sock.makefile("wb", buffering=0)
+    configure_logging(json_output=True, output=log_io, sending_to_supervisor=True)
+
+    # Block ORM access
+    block_orm_access()
+
+    # Initialize SUPERVISOR_COMMS with the requests socket
+    global SUPERVISOR_COMMS
+    log = structlog.get_logger(logger_name="task")
+    SUPERVISOR_COMMS = CommsDecoder[ToTask, ToSupervisor](log=log, socket=requests_sock)
+
+    try:
+        ti, context, log = startup()
+        with BundleVersionLock(
+            bundle_name=ti.bundle_instance.name,
+            bundle_version=ti.bundle_instance.version,
+        ):
+            state, _, error = run(ti, context, log)
+            context["exception"] = error
+            finalize(ti, state, context, log, error)
+    except KeyboardInterrupt:
+        log.exception("Ctrl-c hit")
+        sys.exit(2)
+    except Exception:
+        log.exception("Top level error")
+        sys.exit(1)
+    finally:
+        # Close all sockets
+        for sock in (requests_sock, stdout_sock, stderr_sock, logs_sock):
+            with suppress(Exception):
+                sock.close()
+
+
 if __name__ == "__main__":
-    main()
+    # Check if we're running as a Windows child process
+    if "--windows-child" in sys.argv or os.environ.get("_AIRFLOW_TASK_SDK_WINDOWS_SPAWN") == "1":
+        _windows_child_main()
+    else:
+        main()

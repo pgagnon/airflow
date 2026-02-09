@@ -68,8 +68,8 @@ base_log_folder = conf.get("logging", "base_log_folder", fallback="NOT AVAILABLE
 push_logs = conf.getboolean("edge", "push_logs")
 push_log_chunk_size = conf.getint("edge", "push_log_chunk_size")
 
-if sys.platform == "darwin":
-    setproctitle = lambda title: logger.debug("Mac OS detected, skipping setproctitle")
+if sys.platform in ("darwin", "win32"):
+    setproctitle = lambda title: None
 else:
     from setproctitle import setproctitle
 
@@ -166,7 +166,8 @@ class EdgeWorker:
         logger.info(msg)
         for job in self.jobs:
             if job.process.pid:
-                os.setpgid(job.process.pid, 0)
+                if sys.platform != "win32":
+                    os.setpgid(job.process.pid, 0)
                 os.kill(job.process.pid, signal.SIGTERM)
 
     def _get_sysinfo(self) -> dict:
@@ -200,7 +201,8 @@ class EdgeWorker:
         from airflow.sdk.execution_time.supervisor import supervise
 
         # Ignore ctrl-c in this process -- we don't want to kill _this_ one. we let tasks run to completion
-        os.setpgrp()
+        if sys.platform != "win32":
+            os.setpgrp()
 
         logger.info("Worker starting up pid=%d", os.getpid())
         ti = workload.ti
@@ -280,10 +282,18 @@ class EdgeWorker:
         if not self.daemon:
             write_pid_to_pidfile(self.pid_file_path)
         loop = get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, self.signal_drain)
-        loop.add_signal_handler(SIG_STATUS, self.signal_status)
-        loop.add_signal_handler(signal.SIGTERM, self.shutdown_handler)
-        setproctitle(f"airflow edge worker: {self.hostname}")
+        if sys.platform == "win32":
+            # Windows asyncio doesn't support add_signal_handler.
+            # Use signal.signal() for SIGINT/SIGTERM (Ctrl+C / taskkill).
+            # SIGBREAK (Ctrl+Break) is used as the status signal on Windows.
+            signal.signal(signal.SIGINT, lambda *_: self.signal_drain())
+            signal.signal(signal.SIGTERM, lambda *_: self.shutdown_handler())
+            signal.signal(SIG_STATUS, lambda *_: self.signal_status())
+        else:
+            loop.add_signal_handler(signal.SIGINT, self.signal_drain)
+            loop.add_signal_handler(SIG_STATUS, self.signal_status)
+            loop.add_signal_handler(signal.SIGTERM, self.shutdown_handler)
+            setproctitle(f"airflow edge worker: {self.hostname}")
         os.environ["HOSTNAME"] = self.hostname
         os.environ["AIRFLOW__CORE__HOSTNAME_CALLABLE"] = f"{_edge_hostname.__module__}._edge_hostname"
         try:
@@ -348,7 +358,11 @@ class EdgeWorker:
         process, results_queue = self._launch_job(workload)
         if TYPE_CHECKING:
             assert workload.log_path  # We need to assume this is defined in here
-        logfile = Path(base_log_folder, workload.log_path)
+        log_path = workload.log_path
+        if sys.platform == "win32":
+            # Windows doesn't allow colons in filenames; must match the sanitization in supervisor
+            log_path = log_path.replace(":", "_")
+        logfile = Path(base_log_folder, log_path)
         job = Job(edge_job, process, logfile)
         self.jobs.append(job)
         await jobs_set_state(edge_job.key, TaskInstanceState.RUNNING)

@@ -17,17 +17,16 @@
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
-from fcntl import LOCK_SH, LOCK_UN, flock
 from operator import attrgetter
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,6 +35,61 @@ import pendulum
 from pendulum.parsing import ParserError
 
 from airflow.configuration import conf
+
+# File locking: fcntl on Unix, msvcrt on Windows
+if sys.platform == "win32":
+    import msvcrt
+
+    # Windows file locking constants (compatible with fcntl API usage)
+    LOCK_SH = 0x0  # msvcrt doesn't have shared locks; use no-op for reads
+    LOCK_UN = 0x1  # unlock sentinel
+    _LOCK_EX = 0x2
+    _LOCK_NB = 0x4
+
+    def flock(f, operation):
+        """Emulate fcntl.flock using msvcrt on Windows."""
+        if operation == LOCK_UN:
+            # Unlock
+            try:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        elif operation & _LOCK_NB:
+            # Non-blocking lock
+            try:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                raise BlockingIOError("Could not acquire non-blocking lock")
+        elif operation == LOCK_SH:
+            # Shared lock - Windows doesn't have true shared locks via msvcrt,
+            # but for BundleVersionLock this prevents deletion which is sufficient
+            try:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                pass  # Best-effort shared lock
+        else:
+            # Blocking exclusive lock
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+
+    class _FcntlCompat:
+        """Provide fcntl.LOCK_EX, fcntl.LOCK_NB, and fcntl.flock() for Windows."""
+
+        LOCK_EX = _LOCK_EX
+        LOCK_NB = _LOCK_NB
+
+        @staticmethod
+        def flock(f, operation):
+            return flock(f, operation)
+
+    fcntl = _FcntlCompat()
+else:
+    import fcntl
+
+    from fcntl import LOCK_SH, LOCK_UN, flock
 
 if TYPE_CHECKING:
     from pendulum import DateTime

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
@@ -26,6 +27,9 @@ import pytest
 from tests_common.test_utils.config import conf_vars
 
 pytest_plugins = "tests_common.pytest_plugin"
+
+# Platform detection for test markers
+IS_WINDOWS = sys.platform == "win32"
 
 # Task SDK does not need access to the Airflow database
 os.environ["_AIRFLOW_SKIP_DB_TESTS"] = "true"
@@ -58,6 +62,16 @@ def pytest_configure(config: pytest.Config) -> None:
 
     config.addinivalue_line("markers", "log_level: ")
 
+    # Platform-specific test markers
+    config.addinivalue_line(
+        "markers",
+        "unix_only: mark test as Unix-only (skipped on Windows)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "windows_only: mark test as Windows-only (skipped on Unix)",
+    )
+
     import airflow.settings
 
     airflow.settings.get_policy_plugin_manager()
@@ -74,6 +88,12 @@ def _init_log():
 def pytest_runtest_setup(item):
     if next(item.iter_markers(name="db_test"), None):
         pytest.fail("Task SDK tests must not use database")
+
+    # Skip tests based on platform markers
+    if next(item.iter_markers(name="unix_only"), None) and IS_WINDOWS:
+        pytest.skip("Test requires Unix (skipped on Windows)")
+    if next(item.iter_markers(name="windows_only"), None) and not IS_WINDOWS:
+        pytest.skip("Test requires Windows (skipped on Unix)")
 
 
 class LogCapture:

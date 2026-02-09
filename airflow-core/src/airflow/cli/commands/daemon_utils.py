@@ -17,11 +17,9 @@
 from __future__ import annotations
 
 import signal
+import sys
 from argparse import Namespace
 from collections.abc import Callable
-
-from daemon import daemon
-from daemon.pidfile import TimeoutPIDLockFile
 
 from airflow import settings
 from airflow.utils.cli import setup_locations, setup_logging, sigint_handler, sigquit_handler
@@ -49,6 +47,15 @@ def run_command_with_daemon_option(
         If not specified, a file path is generated with the default pattern.
     """
     if args.daemon:
+        if sys.platform == "win32":
+            raise SystemExit(
+                "Daemon mode is not supported on Windows. "
+                "Run the command in the foreground, or use a Windows Service instead."
+            )
+
+        from daemon import daemon
+        from daemon.pidfile import TimeoutPIDLockFile
+
         pid = pid_file or args.pid if pid_file is not None or args.pid is not None else None
         pid, stdout, stderr, log_file = setup_locations(
             process=process_name, pid=pid, stdout=args.stdout, stderr=args.stderr, log=args.log_file
@@ -82,5 +89,6 @@ def run_command_with_daemon_option(
     else:
         signal.signal(signal.SIGINT, sigint_handler)
         signal.signal(signal.SIGTERM, sigint_handler)
-        signal.signal(signal.SIGQUIT, sigquit_handler)
+        if sys.platform != "win32":
+            signal.signal(signal.SIGQUIT, sigquit_handler)
         callback()

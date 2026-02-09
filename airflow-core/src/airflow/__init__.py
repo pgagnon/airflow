@@ -45,11 +45,8 @@ if os.environ.get("_AIRFLOW_PATCH_GEVENT"):
 
 if sys.platform == "win32":
     warnings.warn(
-        "Airflow currently can be run on POSIX-compliant Operating Systems. For development, "
-        "it is regularly tested on fairly modern Linux Distros and recent versions of macOS. "
-        "On Windows you can run it via WSL2 (Windows Subsystem for Linux 2) or via Linux Containers. "
-        "The work to add Windows support is tracked via https://github.com/apache/airflow/issues/10388, "
-        "but it is not a high priority.",
+        "Native Windows support is experimental. Some features may not work as expected. "
+        "See https://github.com/apache/airflow/issues/10388 for details.",
         category=RuntimeWarning,
         stacklevel=1,
     )

@@ -149,6 +149,10 @@ from tests_common.test_utils.config import conf_vars
 if TYPE_CHECKING:
     import kgb
 
+# Signal constants not available on Windows - use getattr to avoid ImportError
+_SIGKILL = getattr(signal, "SIGKILL", None)
+_SIGUSR1 = getattr(signal, "SIGUSR1", None)
+
 log = logging.getLogger(__name__)
 TI_ID = uuid7()
 
@@ -179,6 +183,7 @@ def client_with_ti_start(make_ti_context):
     return client
 
 
+@pytest.mark.unix_only
 @pytest.mark.usefixtures("disable_capturing")
 class TestSupervisor:
     @pytest.mark.parametrize(
@@ -230,6 +235,7 @@ class TestSupervisor:
                 supervise(**kw)
 
 
+@pytest.mark.unix_only
 @pytest.mark.usefixtures("disable_capturing")
 class TestWatchedSubprocess:
     @pytest.fixture(autouse=True)
@@ -1022,7 +1028,7 @@ class TestWatchedSubprocess:
         ("signal_to_raise", "log_pattern", "level"),
         (
             pytest.param(
-                signal.SIGKILL,
+                _SIGKILL,
                 re.compile(r"Process terminated by signal. Likely out of memory error"),
                 "critical",
                 id="kill",
@@ -1117,6 +1123,7 @@ class TestWatchedSubprocess:
         assert len(proc._open_sockets) == 0
 
 
+@pytest.mark.unix_only
 class TestWatchedSubprocessKill:
     @pytest.fixture
     def mock_process(self, mocker):
@@ -1185,7 +1192,7 @@ class TestWatchedSubprocessKill:
                 id="SIGTERM-escalates-to-SIGKILL",
             ),
             pytest.param(
-                signal.SIGKILL,
+                _SIGKILL,
                 None,
                 id="SIGKILL-success-without-escalation",
             ),
@@ -2907,6 +2914,7 @@ def test_remote_logging_conn_sets_process_context(monkeypatch, mocker):
             assert conn_env_key not in os.environ
 
 
+@pytest.mark.unix_only
 class TestSignalRetryLogic:
     """Test retry logic for exit codes (signals and non-signal failures) in ActivitySubprocess."""
 
@@ -2914,7 +2922,7 @@ class TestSignalRetryLogic:
         "signal",
         [
             signal.SIGTERM,
-            signal.SIGKILL,
+            _SIGKILL,
             signal.SIGABRT,
             signal.SIGSEGV,
         ],
@@ -2939,7 +2947,7 @@ class TestSignalRetryLogic:
     @pytest.mark.parametrize(
         "signal",
         [
-            signal.SIGKILL,
+            _SIGKILL,
             signal.SIGTERM,
             signal.SIGABRT,
             signal.SIGSEGV,

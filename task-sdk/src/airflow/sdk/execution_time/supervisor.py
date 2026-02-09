@@ -25,7 +25,6 @@ import io
 import logging
 import os
 import selectors
-import signal
 import sys
 import threading
 import time
@@ -120,7 +119,14 @@ from airflow.sdk.execution_time.comms import (
     _RequestFrame,
     _ResponseFrame,
 )
+from airflow.sdk.execution_time.platform import IS_WINDOWS
 from airflow.sdk.log import mask_secret
+
+import signal
+
+# These signal constants don't exist on Windows
+_SIGKILL = getattr(signal, "SIGKILL", None)
+_SIGUSR2 = getattr(signal, "SIGUSR2", None)
 
 try:
     from socket import send_fds
@@ -207,11 +213,21 @@ def _subprocess_main():
 
 
 def _reset_signals():
+    """
+    Reset signal handlers to default in child process.
+
+    On Unix, this resets SIGINT, SIGTERM, SIGUSR2 to their default handlers.
+    On Windows, this is mostly a no-op since Windows doesn't support the same
+    signal mechanisms.
+    """
     # Uninstall the rich etc. exception handler
     sys.excepthook = sys.__excepthook__
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
-    signal.signal(signal.SIGTERM, signal.SIG_DFL)
-    signal.signal(signal.SIGUSR2, signal.SIG_DFL)
+
+    if not IS_WINDOWS:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        if _SIGUSR2:
+            signal.signal(_SIGUSR2, signal.SIG_DFL)
 
 
 def _configure_logs_over_json_channel(log_fd: int):
@@ -466,7 +482,25 @@ class WatchedSubprocess:
         logger: FilteringBoundLogger | None = None,
         **constructor_kwargs,
     ) -> Self:
-        """Fork and start a new subprocess with the specified target function."""
+        """
+        Start a new subprocess with the specified target function.
+
+        On Unix, this uses fork() for efficient process creation.
+        On Windows, this uses subprocess.Popen with socket sharing.
+        """
+        if IS_WINDOWS:
+            return cls._start_windows(target=target, logger=logger, **constructor_kwargs)
+        return cls._start_unix(target=target, logger=logger, **constructor_kwargs)
+
+    @classmethod
+    def _start_unix(
+        cls,
+        *,
+        target: Callable[[], None] = _subprocess_main,
+        logger: FilteringBoundLogger | None = None,
+        **constructor_kwargs,
+    ) -> Self:
+        """Fork and start a new subprocess (Unix implementation)."""
         # Create socketpairs/"pipes" to connect to the stdin and out from the subprocess
         child_stdout, read_stdout = socketpair()
         child_stderr, read_stderr = socketpair()
@@ -505,6 +539,90 @@ class WatchedSubprocess:
         # Close the remaining parent-end of the sockets we've passed to the child via fork. We still have the
         # other end of the pair open
         cls._close_unused_sockets(child_stdout, child_stderr, child_logs)
+
+        logger = logger or cast("FilteringBoundLogger", structlog.get_logger(logger_name="task").bind())
+        proc = cls(
+            pid=pid,
+            stdin=read_requests,
+            process=psutil.Process(pid),
+            process_log=logger,
+            start_time=time.monotonic(),
+            **constructor_kwargs,
+        )
+
+        proc._register_pipe_readers(
+            stdout=read_stdout,
+            stderr=read_stderr,
+            requests=read_requests,
+            logs=read_logs,
+        )
+
+        return proc
+
+    @classmethod
+    def _start_windows(
+        cls,
+        *,
+        target: Callable[[], None] = _subprocess_main,
+        logger: FilteringBoundLogger | None = None,
+        **constructor_kwargs,
+    ) -> Self:
+        """
+        Spawn a new subprocess using subprocess.Popen (Windows implementation).
+
+        On Windows, we can't use fork(), so we spawn a new Python process and
+        pass socket information via environment variables. The child process
+        recreates the sockets using socket.fromshare().
+        """
+        import base64
+        import subprocess
+
+        # Create socketpairs for communication (available on Windows since Python 3.10)
+        child_stdout, read_stdout = socketpair()
+        child_stderr, read_stderr = socketpair()
+        child_requests, read_requests = socketpair()
+        child_logs, read_logs = socketpair()
+
+        # First, spawn the process to get its PID, then share sockets with it
+        # We need to use a two-phase approach because socket.share() requires the target PID
+
+        # Prepare environment with marker that child should expect socket data
+        env = os.environ.copy()
+        env["_AIRFLOW_TASK_SDK_WINDOWS_SPAWN"] = "1"
+
+        # Spawn the child process
+        proc_handle = subprocess.Popen(
+            [sys.executable, "-m", "airflow.sdk.execution_time.task_runner", "--windows-child"],
+            env=env,
+            stdin=subprocess.PIPE,
+        )
+        pid = proc_handle.pid
+
+        # Now share the sockets with the child process
+        # socket.share() returns bytes that can be used to recreate the socket in another process
+        try:
+            socket_data = {
+                "requests": base64.b64encode(child_requests.share(pid)).decode("ascii"),
+                "stdout": base64.b64encode(child_stdout.share(pid)).decode("ascii"),
+                "stderr": base64.b64encode(child_stderr.share(pid)).decode("ascii"),
+                "logs": base64.b64encode(child_logs.share(pid)).decode("ascii"),
+            }
+
+            # Send the socket data to the child via stdin as JSON
+            import json
+
+            socket_json = json.dumps(socket_data).encode("utf-8")
+            proc_handle.stdin.write(len(socket_json).to_bytes(4, byteorder="big"))
+            proc_handle.stdin.write(socket_json)
+            proc_handle.stdin.flush()
+            proc_handle.stdin.close()
+        except Exception:
+            # If socket sharing fails, kill the child and re-raise
+            proc_handle.kill()
+            raise
+
+        # Close child-side sockets (parent doesn't need them)
+        cls._close_unused_sockets(child_stdout, child_stderr, child_logs, child_requests)
 
         logger = logger or cast("FilteringBoundLogger", structlog.get_logger(logger_name="task").bind())
         proc = cls(
@@ -672,24 +790,41 @@ class WatchedSubprocess:
 
     def kill(
         self,
-        signal_to_send: signal.Signals = signal.SIGINT,
+        signal_to_send: int | None = None,
         escalation_delay: float = 5.0,
         force: bool = False,
     ):
         """
-        Attempt to terminate the subprocess with a given signal.
+        Attempt to terminate the subprocess.
 
-        If the process does not exit within `escalation_delay` seconds, escalate to SIGTERM and eventually SIGKILL if necessary.
+        On Unix: Uses signal escalation (SIGINT -> SIGTERM -> SIGKILL).
+        On Windows: Uses psutil's terminate() then kill().
 
-        :param signal_to_send: The signal to send initially (default is SIGINT).
-        :param escalation_delay: Time in seconds to wait before escalating to a stronger signal.
-        :param force: If True, ensure escalation through all signals without skipping.
+        :param signal_to_send: The signal to send initially (Unix only, default is SIGINT).
+        :param escalation_delay: Time in seconds to wait before escalating.
+        :param force: If True, ensure escalation through all signals/methods without skipping.
         """
         if self._exit_code is not None:
             return
 
+        if IS_WINDOWS:
+            self._kill_windows(escalation_delay=escalation_delay)
+        else:
+            self._kill_unix(
+                signal_to_send=signal_to_send or signal.SIGINT,
+                escalation_delay=escalation_delay,
+                force=force,
+            )
+
+    def _kill_unix(
+        self,
+        signal_to_send: int,
+        escalation_delay: float = 5.0,
+        force: bool = False,
+    ):
+        """Unix process termination with signal escalation."""
         # Escalation sequence: SIGINT -> SIGTERM -> SIGKILL
-        escalation_path: list[signal.Signals] = [signal.SIGINT, signal.SIGTERM, signal.SIGKILL]
+        escalation_path: list[int] = [signal.SIGINT, signal.SIGTERM, _SIGKILL]
 
         if force and signal_to_send in escalation_path:
             # Start from `signal_to_send` and escalate to the end of the escalation path
@@ -713,7 +848,8 @@ class WatchedSubprocess:
                             max_wait_time=end - now, raise_on_timeout=False, expect_signal=sig
                         )
                     ) is not None:
-                        log.info("Process exited", pid=self.pid, exit_code=exit_code, signal_sent=sig.name)
+                        sig_name = signal.Signals(sig).name if hasattr(signal, "Signals") else str(sig)
+                        log.info("Process exited", pid=self.pid, exit_code=exit_code, signal_sent=sig_name)
                         return
 
                     now = time.monotonic()
@@ -721,13 +857,48 @@ class WatchedSubprocess:
                 msg = "Process did not terminate in time"
                 if sig != escalation_path[-1]:
                     msg += "; escalating"
-                log.warning(msg, pid=self.pid, signal=sig.name)
+                sig_name = signal.Signals(sig).name if hasattr(signal, "Signals") else str(sig)
+                log.warning(msg, pid=self.pid, signal=sig_name)
             except psutil.NoSuchProcess:
                 log.debug("Process already terminated", pid=self.pid)
                 self._exit_code = -1
                 return
 
         log.error("Failed to terminate process after full escalation", pid=self.pid)
+
+    def _kill_windows(self, escalation_delay: float = 5.0):
+        """Windows process termination using psutil's terminate/kill."""
+        try:
+            # First try graceful termination
+            self._process.terminate()
+
+            start = time.monotonic()
+            end = start + escalation_delay
+
+            while time.monotonic() < end:
+                if (
+                    exit_code := self._service_subprocess(
+                        max_wait_time=end - time.monotonic(), raise_on_timeout=False
+                    )
+                ) is not None:
+                    log.info("Process exited after terminate()", pid=self.pid, exit_code=exit_code)
+                    return
+
+            # Process didn't terminate gracefully, force kill
+            log.warning("Process did not terminate in time; forcing kill", pid=self.pid)
+            self._process.kill()
+
+            # Wait a bit more for the kill to take effect
+            try:
+                exit_code = self._process.wait(timeout=1.0)
+                log.info("Process exited after kill()", pid=self.pid, exit_code=exit_code)
+                self._exit_code = exit_code
+            except psutil.TimeoutExpired:
+                log.error("Failed to terminate process after kill()", pid=self.pid)
+
+        except psutil.NoSuchProcess:
+            log.debug("Process already terminated", pid=self.pid)
+            self._exit_code = -1
 
     def wait(self) -> int:
         raise NotImplementedError()
@@ -764,7 +935,17 @@ class WatchedSubprocess:
         """
         # Ensure minimum timeout to prevent CPU spike with tight loop when timeout is 0 or negative
         timeout = max(0.01, max_wait_time)
-        events = self.selector.select(timeout=timeout)
+        try:
+            events = self.selector.select(timeout=timeout)
+        except OSError:
+            # On Windows, select() raises OSError (WinError 10022) when a socket's peer has
+            # closed or the socket is in an error state. Treat this as all sockets being closed.
+            if IS_WINDOWS:
+                self._cleanup_open_sockets()
+                return self._check_subprocess_exit(
+                    raise_on_timeout=raise_on_timeout, expect_signal=expect_signal
+                )
+            raise
         for key, _ in events:
             # Retrieve the handler responsible for processing this file object (e.g., stdout, stderr)
             socket_handler, on_close = key.data
@@ -811,14 +992,26 @@ class WatchedSubprocess:
                 return self._exit_code
 
             # Put a message in the viewable task logs
+            self._log_exit_code()
+        return self._exit_code
 
+    def _log_exit_code(self) -> None:
+        """Log information about the process exit code."""
+        if self._exit_code is None or self._exit_code == 0:
+            return
+
+        if IS_WINDOWS:
+            # Windows has different exit code semantics - no signal-based negative codes
+            self.process_log.warning("Process exited abnormally", exit_code=self._exit_code)
+        else:
+            # Unix: negative exit codes indicate signals
             if self._exit_code == -signal.SIGSEGV:
                 self.process_log.critical(SIGSEGV_MESSAGE)
-            # psutil turns signal exit codes into an enum for us. Handy. (Otherwise it's a plain integer) if exit_code and (name := getattr(exit_code, "name")):
+            # psutil turns signal exit codes into an enum for us. Handy. (Otherwise it's a plain integer)
             elif name := getattr(self._exit_code, "name", None):
                 message = "Process terminated by signal."
                 level = logging.ERROR
-                if self._exit_code == -signal.SIGKILL:
+                if _SIGKILL and self._exit_code == -_SIGKILL:
                     message += " Likely out of memory error (OOM)."
                     level = logging.CRITICAL
                 message += " For more information, see https://airflow.apache.org/docs/apache-airflow/stable/troubleshooting.html#process-terminated-by-signal."
@@ -827,7 +1020,6 @@ class WatchedSubprocess:
                 # Run of the mill exit code (1, 42, etc).
                 # Most task errors should be caught in the task runner and _that_ exits with 0.
                 self.process_log.warning("Process exited abnormally", exit_code=self._exit_code)
-        return self._exit_code
 
 
 _REMOTE_LOGGING_CONN_CACHE: dict[str, Connection | None] = {}
@@ -1009,7 +1201,8 @@ class ActivitySubprocess(WatchedSubprocess):
             self._last_successful_heartbeat = time.monotonic()
         except Exception:
             # On any error kill that subprocess!
-            self.kill(signal.SIGKILL)
+            # Use SIGKILL on Unix, force kill on Windows
+            self.kill(_SIGKILL)
             raise
 
         msg = StartupDetails.model_construct(
@@ -1444,6 +1637,16 @@ class ActivitySubprocess(WatchedSubprocess):
                 self._send_new_log_fd(req_id)
                 # Since we've sent the message, return. Nothing else in this ifelse/switch should return directly
                 return
+            log.warning("ResendLoggingFD not supported on this platform")
+            self.send_msg(
+                None,
+                request_id=req_id,
+                error=ErrorResponse(
+                    error=ErrorType.API_SERVER_ERROR,
+                    detail={"status_code": 501, "message": "ResendLoggingFD not supported on Windows"},
+                ),
+            )
+            return
         elif isinstance(msg, CreateHITLDetailPayload):
             hitl_detail_request = self.client.hitl.add_response(
                 ti_id=msg.ti_id,
@@ -1957,6 +2160,10 @@ def _configure_logging(log_path: str, client: Client) -> tuple[FilteringBoundLog
     from airflow.sdk.log import init_log_file, logging_processors
 
     log_file_descriptor: BinaryIO | TextIO | None = None
+
+    if IS_WINDOWS:
+        # Windows doesn't allow colons in filenames; run_id contains ISO timestamps with colons
+        log_path = log_path.replace(":", "_")
 
     log_file = init_log_file(log_path)
 
