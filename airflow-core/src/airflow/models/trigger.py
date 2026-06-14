@@ -542,6 +542,19 @@ def handle_event_submit(event: TriggerEvent, *, task_instance: TaskInstance, ses
     task_instance.scheduled_dttm = timezone.utcnow()
     session.flush()
 
+    # A task that starts deferred (start_from_trigger) never passes through
+    # DagRun.schedule_tis, so this resume is the first SCHEDULED transition its attempt
+    # reaches; materialize any scheduled-anchor deadlines now. The idempotency guard makes
+    # this a no-op for tasks that were already scheduled before deferring.
+    from airflow.serialization.definitions.dag import _process_taskinstance_deadline_alerts
+    from airflow.serialization.definitions.deadline import SerializedReferenceModels
+
+    _process_taskinstance_deadline_alerts(
+        [task_instance],
+        bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_SCHEDULED,
+        session=session,
+    )
+
 
 @handle_event_submit.register
 def _(event: BaseTaskEndEvent, *, task_instance: TaskInstance, session: Session) -> None:

@@ -156,6 +156,15 @@ class TestDeadlineAlert:
         )
         assert not alert1.matches_definition(different_callback)
 
+        different_task = DeadlineAlert(
+            serialized_dag_id=SERIALIZED_DAG_ID,
+            reference=deadline_reference,
+            interval=DEADLINE_INTERVAL,
+            callback_def=DEADLINE_CALLBACK,
+            task_id="some_task",
+        )
+        assert not alert1.matches_definition(different_task)
+
         assert alert1.matches_definition("not a deadline alert") is NotImplemented
 
     def test_deadline_alert_reference_class_property(self, deadline_alert_orm):

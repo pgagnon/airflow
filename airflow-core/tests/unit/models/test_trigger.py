@@ -234,6 +234,61 @@ def test_submit_event(mock_callback_handle_event, session, create_task_instance)
     mock_callback_handle_event.assert_called_once_with(event, session)
 
 
+def test_submit_event_materializes_scheduled_task_deadline(session):
+    """Resuming a start-deferred task to SCHEDULED materializes its scheduled-anchor deadline.
+
+    Such a task never passes through DagRun.schedule_tis, so the deferred-resume path is the
+    first SCHEDULED transition its attempt reaches.
+    """
+    from airflow.models.deadline import Deadline
+    from airflow.sdk import DAG
+    from airflow.sdk.definitions.deadline import DeadlineAlert, DeadlineReference
+    from airflow.utils.types import DagRunTriggeredByType, DagRunType
+
+    from tests_common.test_utils.dag import sync_dag_to_db
+
+    trigger = Trigger(classpath="airflow.triggers.testing.SuccessTrigger", kwargs={})
+    session.add(trigger)
+
+    dag = DAG(dag_id="test_deferred_task_deadline", schedule=datetime.timedelta(days=1))
+    EmptyOperator(
+        task_id="deferred_task",
+        dag=dag,
+        deadline=DeadlineAlert(
+            reference=DeadlineReference.TASKINSTANCE_SCHEDULED_AT,
+            interval=datetime.timedelta(minutes=5),
+            callback=AsyncCallback("classpath.callback"),
+        ),
+    )
+    scheduler_dag = sync_dag_to_db(dag, session=session)
+    session.flush()
+    dr = scheduler_dag.create_dagrun(
+        run_id="test_run",
+        run_after=timezone.utcnow(),
+        logical_date=timezone.utcnow(),
+        data_interval=(timezone.utcnow(), timezone.utcnow()),
+        state=State.RUNNING,
+        run_type=DagRunType.MANUAL,
+        triggered_by=DagRunTriggeredByType.TEST,
+        session=session,
+    )
+    session.flush()
+    ti = dr.get_task_instance("deferred_task", session=session)
+    ti.state = State.DEFERRED
+    ti.trigger_id = trigger.id
+    session.flush()
+    assert session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all() == []
+
+    Trigger.submit_event(trigger.id, TriggerEvent("payload"), session=session)
+    session.flush()
+
+    session.refresh(ti)
+    assert ti.state == State.SCHEDULED
+    deadlines = session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
+    assert len(deadlines) == 1
+    assert deadlines[0].deadline_time == ti.scheduled_dttm + datetime.timedelta(minutes=5)
+
+
 def test_submit_failure(session, create_task_instance):
     """
     Tests that failures submitted to a trigger fail their dependent

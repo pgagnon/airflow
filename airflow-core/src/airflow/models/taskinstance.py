@@ -107,7 +107,7 @@ from airflow.utils.platform import getuser
 from airflow.utils.retries import run_with_db_retries
 from airflow.utils.session import NEW_SESSION, create_session, provide_session
 from airflow.utils.span_status import SpanStatus
-from airflow.utils.sqlalchemy import ExecutorConfigType, ExtendedJSON, UtcDateTime
+from airflow.utils.sqlalchemy import ExecutorConfigType, ExtendedJSON, UtcDateTime, with_row_locks
 from airflow.utils.state import DagRunState, State, TaskInstanceState
 
 TR = TaskReschedule
@@ -668,6 +668,12 @@ class TaskInstance(Base, LoggingMixin, BaseWorkload):
         "RenderedTaskInstanceFields", lazy="raise", uselist=False, passive_deletes=True
     )
     hitl_detail = relationship("HITLDetail", lazy="raise", uselist=False, passive_deletes=True)
+    deadlines = relationship(
+        "Deadline",
+        back_populates="task_instance",
+        uselist=True,
+        cascade="all, delete, delete-orphan",
+    )
 
     run_after = association_proxy("dag_run", "run_after")
     logical_date = association_proxy("dag_run", "logical_date")
@@ -998,6 +1004,19 @@ class TaskInstance(Base, LoggingMixin, BaseWorkload):
             self.duration = (self.end_date - self.start_date).total_seconds()
         session.merge(self)
         session.flush()
+        if self.state == TaskInstanceState.SUCCESS:
+            # The task has succeeded. If there were any Deadlines for it which were not breached,
+            # they are no longer needed. The existence check keeps the hot path cheap for tasks
+            # without deadlines.
+            if (
+                session.scalar(select(Deadline.id).where(Deadline.task_instance_id == self.id).limit(1))
+                is not None
+            ):
+                Deadline.prune_deadlines(
+                    session=session,
+                    conditions={TaskInstance.id: self.id},
+                    anchor_model=TaskInstance,
+                )
         return True
 
     @property
@@ -1012,6 +1031,38 @@ class TaskInstance(Base, LoggingMixin, BaseWorkload):
 
         TaskInstanceHistory.record_ti(self, session=session)
         session.execute(delete(TaskReschedule).filter_by(ti_id=self.id))
+        # The task-level deadline FK points at the current id, which is about to rotate, so
+        # this attempt's deadlines must stop referencing it. Lock the rows first so this can't
+        # race the scheduler's missed-deadline scan (SELECT ... FOR UPDATE SKIP LOCKED WHERE
+        # NOT missed): while we hold the locks the scan skips these rows, and any in-flight
+        # scan must commit before our SELECT returns, so the `missed` we read is authoritative.
+        # This shares the scheduler scan's row-lock concurrency model; on backends without
+        # row-level locking (MariaDB / MySQL < 8) the lock is a no-op, but HA scheduling — the
+        # only way two writers reach these rows concurrently — isn't supported there anyway.
+        # Then, mirroring how SUCCESS pruning keeps breached deadlines:
+        #   * already missed -> the alert fired and its callback is queued; detach (keep it).
+        #   * breached but unmissed -> the scheduler hasn't fired it; fire it now (FK intact),
+        #     then detach.
+        #   * not breached -> stale; the next attempt re-materializes its own, so delete it
+        #     (the ORM delete cascades its callback).
+        now = timezone.utcnow()
+        locked_deadlines = session.scalars(
+            with_row_locks(
+                select(Deadline).where(Deadline.task_instance_id == self.id),
+                session=session,
+                of=Deadline,
+                key_share=False,
+            )
+        ).all()
+        for deadline in locked_deadlines:
+            if not deadline.missed and deadline.deadline_time <= now:
+                deadline.handle_miss(session=session)
+            if deadline.missed:
+                deadline.task_instance_id = None
+            else:
+                session.delete(deadline)
+        # Flush before rotating the id so no deadline still references the old id.
+        session.flush()
         self.id = uuid7()
 
     @provide_session

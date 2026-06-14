@@ -257,6 +257,20 @@ def ti_run(
         result = session.execute(query)
         log.info("Task instance state updated", rows_affected=getattr(result, "rowcount", 0))
 
+        # Materialize task-level Deadline rows for started-anchor alerts now that start_date
+        # is persisted. Deferred import to avoid pulling scheduler/serialization deps at module
+        # import time and to sidestep circular imports.
+        from airflow.serialization.definitions.dag import _process_taskinstance_deadline_alerts
+        from airflow.serialization.definitions.deadline import SerializedReferenceModels
+
+        started_ti = session.get(TI, task_instance_id)
+        if started_ti is not None:
+            _process_taskinstance_deadline_alerts(
+                [started_ti],
+                bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_STARTED,
+                session=session,
+            )
+
         dr = (
             session.scalars(
                 select(DR)

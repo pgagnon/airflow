@@ -1612,6 +1612,7 @@ class TestStringifiedDAGs:
             "_pre_execute_hook": None,
             "_task_display_name": None,
             "allow_nested_operators": True,
+            "deadline": None,
             "depends_on_past": False,
             "do_xcom_push": True,
             "doc": None,

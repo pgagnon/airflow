@@ -39,6 +39,8 @@ from airflow.sdk.bases.operator import (
     chain_linear,
     cross_downstream,
 )
+from airflow.sdk.definitions.callback import AsyncCallback
+from airflow.sdk.definitions.deadline import DeadlineAlert, DeadlineReference
 from airflow.sdk.definitions.param import ParamsDict
 from airflow.sdk.definitions.template import literal
 from airflow.triggers.base import StartTriggerArgs
@@ -1137,3 +1139,46 @@ def test_partial_default_args():
     assert op.arg2 == "b"
     assert op.arg3 == 3
     assert op.queue == "THIS"
+
+
+def _make_deadline(interval_hours=1):
+    return DeadlineAlert(
+        reference=DeadlineReference.TASKINSTANCE_QUEUED_AT,
+        interval=timedelta(hours=interval_hours),
+        callback=AsyncCallback("my_module.my_callback"),
+    )
+
+
+class TestOperatorDeadline:
+    def test_single_deadline_normalized_to_list(self):
+        alert = _make_deadline()
+        op = MockOperator(task_id="t", deadline=alert)
+        assert op.deadline == [alert]
+
+    def test_list_of_deadlines_preserved(self):
+        alert1 = _make_deadline(1)
+        alert2 = _make_deadline(2)
+        op = MockOperator(task_id="t", deadline=[alert1, alert2])
+        assert op.deadline == [alert1, alert2]
+
+    def test_default_deadline_is_none(self):
+        op = MockOperator(task_id="t")
+        assert op.deadline is None
+
+    def test_task_decorator_deadline(self):
+        alert = _make_deadline()
+
+        @task_decorator(deadline=alert)
+        def my_task():
+            return 1
+
+        op = my_task().operator
+        assert op.deadline == [alert]
+
+    def test_partial_carries_deadline(self):
+        alert = _make_deadline()
+        with DAG("deadline_dag", schedule=None):
+            mapped = MockOperator.partial(task_id="t", deadline=alert).expand(arg1=[1, 2])
+        assert mapped.partial_kwargs["deadline"] == [alert]
+        unmapped = mapped.unmap({"arg1": 1})
+        assert unmapped.deadline == [alert]

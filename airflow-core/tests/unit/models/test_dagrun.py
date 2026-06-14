@@ -2540,6 +2540,49 @@ def test_schedule_tis_map_index(dag_maker, session):
     assert ti2.state == TaskInstanceState.SUCCESS
 
 
+def test_schedule_tis_materializes_scheduled_task_deadline(dag_maker, session):
+    """schedule_tis materializes a TASKINSTANCE_SCHEDULED_AT deadline at the SCHEDULED transition.
+
+    This guarantees a pool-blocked task that never queues still has a deadline the scheduler
+    can detect as missed.
+    """
+    dag = DAG(dag_id="test_schedule_deadline", schedule=datetime.timedelta(days=1))
+    BaseOperator(
+        task_id="task_1",
+        dag=dag,
+        deadline=DeadlineAlert(
+            reference=DeadlineReference.TASKINSTANCE_SCHEDULED_AT,
+            interval=datetime.timedelta(minutes=5),
+            callback=AsyncCallback(empty_callback_for_deadline),
+        ),
+    )
+    scheduler_dag = sync_dag_to_db(dag, session=session)
+    session.flush()
+    dag_run = scheduler_dag.create_dagrun(
+        run_id="test_run",
+        run_after=DEFAULT_DATE,
+        logical_date=DEFAULT_DATE,
+        data_interval=(DEFAULT_DATE, DEFAULT_DATE),
+        state=DagRunState.RUNNING,
+        run_type=DagRunType.MANUAL,
+        triggered_by=DagRunTriggeredByType.TEST,
+        session=session,
+    )
+    session.flush()
+    ti = dag_run.get_task_instance("task_1", session=session)
+    ti.task = scheduler_dag.get_task("task_1")
+    ti.state = None
+    session.flush()
+
+    assert dag_run.schedule_tis((ti,), session=session) == 1
+    session.flush()
+
+    deadlines = session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
+    assert len(deadlines) == 1
+    session.refresh(ti)
+    assert deadlines[0].deadline_time == ti.scheduled_dttm + datetime.timedelta(minutes=5)
+
+
 def test_schedule_tis_does_not_increment_try_number_if_ti_already_queued_by_other_scheduler(
     dag_maker, session
 ):
@@ -2894,8 +2937,17 @@ def test_schedule_tis_try_number_mismatch_logs_warning(dag_maker, session: Sessi
         def all(self):
             return [(ti.id, ti.try_number + 2, TaskInstanceState.SCHEDULED)]
 
+    def _is_debug_try_number_select(statement) -> bool:
+        # Only intercept the debug try-number readback (SELECT on TaskInstance), not the
+        # deadline-materialization selects schedule_tis also issues.
+        return (
+            getattr(statement, "is_select", False)
+            and statement.column_descriptions
+            and statement.column_descriptions[0]["entity"] is TaskInstance
+        )
+
     def execute_with_mismatch(statement, *args, **kwargs):
-        if getattr(statement, "is_select", False):
+        if _is_debug_try_number_select(statement):
             return _FakeSelectResult()
         return original_execute(statement, *args, **kwargs)
 
@@ -2942,12 +2994,18 @@ def test_schedule_tis_try_number_check_is_debug_only(dag_maker, session: Session
     assert ti is not None
 
     original_execute = session.execute
-    select_calls = 0
+    debug_select_calls = 0
 
     def execute_with_counter(statement, *args, **kwargs):
-        nonlocal select_calls
-        if getattr(statement, "is_select", False):
-            select_calls += 1
+        nonlocal debug_select_calls
+        # Count only the debug try-number readback (SELECT on TaskInstance); schedule_tis
+        # also issues deadline-materialization selects that are unrelated to this check.
+        if (
+            getattr(statement, "is_select", False)
+            and statement.column_descriptions
+            and statement.column_descriptions[0]["entity"] is TaskInstance
+        ):
+            debug_select_calls += 1
         return original_execute(statement, *args, **kwargs)
 
     monkeypatch.setattr(session, "execute", execute_with_counter)
@@ -2955,7 +3013,7 @@ def test_schedule_tis_try_number_check_is_debug_only(dag_maker, session: Session
     with mock.patch.object(dr.log, "isEnabledFor", return_value=False):
         dr.schedule_tis((ti,), session=session)
 
-    assert select_calls == 0
+    assert debug_select_calls == 0
 
 
 @pytest.mark.xfail(reason="We can't keep this behaviour with remote workers where scheduler can't reach xcom")

@@ -43,6 +43,14 @@ The most direct migration path would be to use the ``DeadlineReference.DAGRUN_LO
 the major change is that the Deadline's callback will execute "immediately" (within ``scheduler_heartbeat_sec`` of the
 calculated expiration time) and not wait until the Dag finishes first.
 
+SLA was a task-level feature, applied per task through ``default_args={"sla": ...}``. Deadline Alerts
+can now be attached at the task level too, which is the direct replacement for a task SLA: pass a
+``DeadlineAlert`` to a task's ``deadline`` parameter using one of the ``TASKINSTANCE_*`` references (for
+example ``DeadlineReference.TASKINSTANCE_STARTED_AT``). See :ref:`task-level-deadline-alerts` for details.
+The semantics still differ in the same way as at the Dag level: a task SLA is only evaluated when the task
+finishes, whereas a task-level Deadline is checked proactively by the scheduler and its callback fires as
+soon as the deadline passes, even if the task is still running.
+
 Equivalent Example Dags
 -----------------------
 

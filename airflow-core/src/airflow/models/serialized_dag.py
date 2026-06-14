@@ -399,57 +399,80 @@ class SerializedDagModel(Base):
         return serialized_dag
 
     @classmethod
-    def _generate_deadline_uuids(cls, dag_data: dict[str, Any]) -> dict[str, dict]:
+    def _iter_deadline_carriers(cls, dag_data: dict[str, Any]) -> Iterable[tuple[dict, str | None]]:
+        """
+        Yield (carrier, task_id) pairs for every dict carrying a non-empty ``deadline``.
+
+        The Dag dict (``task_id=None``) is yielded first, then each task dict in a stable
+        (task_id-sorted) order so the serialized hash stays reproducible.
+        """
+        dag_dict = dag_data.get("dag", {})
+        if dag_dict.get("deadline"):
+            yield dag_dict, None
+
+        tasks = dag_dict.get("tasks") or []
+        task_carriers = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_data = task.get(Encoding.VAR, task)
+            if task_data.get("deadline"):
+                task_carriers.append((task_data, task_data["task_id"]))
+        for task_data, task_id in sorted(task_carriers, key=lambda item: item[1]):
+            yield task_data, task_id
+
+    @classmethod
+    def _generate_deadline_uuids(cls, dag_data: dict[str, Any]) -> dict[str, tuple[dict, str | None]]:
         """
         Generate UUIDs for DeadlineAlerts and replace dicts with list[UUID] in dag_data.
 
-        This modifies dag_data in place, replacing deadline alert definitions with UUID strings.
+        This modifies dag_data in place, replacing deadline alert definitions with UUID strings
+        for the Dag and every task that carries deadlines.
         Called before SerializedDagModel creation to ensure UUIDs are included in the hash.
 
         :param dag_data: The serialized DAG data dictionary
-        :return: Mapping of UUID strings to deadline alert data dicts
+        :return: Mapping of UUID string → (deadline alert data dict, task_id)
         """
-        uuid_mapping: dict[str, dict] = {}
+        uuid_mapping: dict[str, tuple[dict, str | None]] = {}
 
-        dag_deadline_data = dag_data.get("dag", {}).get("deadline")
-        if not dag_deadline_data:
-            return uuid_mapping
-
-        for deadline_alert in dag_deadline_data:
-            deadline_data = deadline_alert.get(Encoding.VAR, deadline_alert)
-
-            deadline_uuid = str(uuid6.uuid7())
-            uuid_mapping[deadline_uuid] = deadline_data
-
-        dag_data["dag"]["deadline"] = list(uuid_mapping.keys())
+        for carrier, task_id in cls._iter_deadline_carriers(dag_data):
+            carrier_uuids: list[str] = []
+            for deadline_alert in carrier["deadline"]:
+                deadline_data = deadline_alert.get(Encoding.VAR, deadline_alert)
+                deadline_uuid = str(uuid6.uuid7())
+                uuid_mapping[deadline_uuid] = (deadline_data, task_id)
+                carrier_uuids.append(deadline_uuid)
+            carrier["deadline"] = carrier_uuids
 
         return uuid_mapping
 
     @classmethod
     def _try_reuse_deadline_uuids(
         cls,
-        existing_deadline_uuids: list[str],
-        new_deadline_data: list[dict],
+        existing_dag_data: dict[str, Any],
+        new_dag_data: dict[str, Any],
         session: Session,
-    ) -> tuple[dict[str, dict], dict[str, str | None]] | None:
+    ) -> tuple[dict[str, tuple[dict, str | None]], dict[str, str | None]] | None:
         """
         Try to reuse existing deadline UUIDs if the deadline definitions haven't changed.
 
-        Returns None if Deadline hashes are not all identical, indicating they need to be updated.
+        Reuse is scoped per ``(serialized_dag_id, task_id)``: a task alert is only matched
+        against existing alerts for the same task, and the Dag-level alert
+        (``task_id=None``) only against existing Dag-level alerts, so a task alert can never
+        reuse a Dag-level row (and vice versa).
 
-        :param existing_deadline_uuids: List of UUID strings from existing serialized Dag
-        :param new_deadline_data: List of new deadline alert data dicts from the Dag
+        Returns None if any carrier's deadlines are not all identical, indicating they need
+        to be regenerated.
+
+        :param existing_dag_data: ``data`` of the existing serialized Dag
+        :param new_dag_data: ``data`` of the new serialized Dag (mutated in place to reuse UUIDs)
         :param session: Database session
         :return: Tuple of (uuid_mapping, name_updates) if all definitions match, None if any
-            mismatch detected.  ``uuid_mapping`` maps UUID string → new deadline data dict.
-            ``name_updates`` maps UUID string → new name **only** for entries whose name
-            changed relative to the existing DB row, so callers can issue targeted UPDATEs
+            mismatch detected.  ``uuid_mapping`` maps UUID string → (new deadline data dict,
+            task_id).  ``name_updates`` maps UUID string → new name **only** for entries whose
+            name changed relative to the existing DB row, so callers can issue targeted UPDATEs
             and reliably detect whether any DB write occurred.
         """
-        # defensive check for old 3.1.x format
-        if existing_deadline_uuids and not isinstance(existing_deadline_uuids[0], str):
-            # this triggers _generate_deadline_uuids to create fresh UUIDs
-            return None
 
         def _definitions_match(deadline_data: dict, existing: DeadlineAlertModel) -> bool:
             """Check if raw deadline data matches an existing DeadlineAlert's definition."""
@@ -459,45 +482,78 @@ class SerializedDagModel(Base):
                 and deadline_data[DeadlineAlertFields.CALLBACK] == existing.callback_def
             )
 
-        if len(existing_deadline_uuids) != len(new_deadline_data):
+        existing_uuids_by_task = {
+            task_id: carrier["deadline"]
+            for carrier, task_id in cls._iter_deadline_carriers(existing_dag_data)
+        }
+        new_carriers = list(cls._iter_deadline_carriers(new_dag_data))
+
+        # The set of deadline-bearing carriers (Dag + tasks) must match exactly.
+        if existing_uuids_by_task.keys() != {task_id for _, task_id in new_carriers}:
             return None
 
-        existing_deadline_uuids_as_uuid = [UUID(uid) for uid in existing_deadline_uuids]
-        existing_alerts = session.scalars(
-            select(DeadlineAlertModel).where(DeadlineAlertModel.id.in_(existing_deadline_uuids_as_uuid))
-        ).all()
-
-        if len(existing_alerts) != len(existing_deadline_uuids):
-            return None
-
-        matched_uuids: set[UUID] = set()
-        uuid_mapping: dict[str, dict] = {}
+        uuid_mapping: dict[str, tuple[dict, str | None]] = {}
         name_updates: dict[str, str | None] = {}
+        # Buffer the rewritten deadline list per carrier and only apply once every carrier
+        # has matched. Mutating in place before the full loop succeeds would leave earlier
+        # carriers rewritten to UUID strings when a later carrier mismatches and we return
+        # None, breaking the _generate_deadline_uuids fallback (it expects encoded dicts).
+        pending_rewrites: list[tuple[dict, list[str]]] = []
 
-        for deadline_alert in new_deadline_data:
-            deadline_data = deadline_alert.get(Encoding.VAR, deadline_alert)
+        for carrier, task_id in new_carriers:
+            existing_deadline_uuids = existing_uuids_by_task[task_id]
+            new_deadline_data = carrier["deadline"]
 
-            found_match = False
-            for existing_alert in existing_alerts:
-                if existing_alert.id in matched_uuids:
-                    continue  # Already matched to another new deadline
-
-                if _definitions_match(deadline_data, existing_alert):
-                    # Found a match, reuse this UUID
-                    uuid_str = str(existing_alert.id)
-                    uuid_mapping[uuid_str] = deadline_data
-                    matched_uuids.add(existing_alert.id)
-                    found_match = True
-                    new_name = deadline_data.get(DeadlineAlertFields.NAME)
-                    if new_name != existing_alert.name:
-                        name_updates[uuid_str] = new_name
-                    break
-
-            if not found_match:
-                # Any mismatch triggers full regeneration of all UUIDs. This is intentional:
-                # deadlines may be interdependent (e.g. a custom DeadlineReference relative
-                # to another deadline), so partial reuse would risk stale cross-references.
+            # defensive check for old 3.1.x format
+            if existing_deadline_uuids and not isinstance(existing_deadline_uuids[0], str):
+                # this triggers _generate_deadline_uuids to create fresh UUIDs
                 return None
+
+            if len(existing_deadline_uuids) != len(new_deadline_data):
+                return None
+
+            existing_deadline_uuids_as_uuid = [UUID(uid) for uid in existing_deadline_uuids]
+            existing_alerts = session.scalars(
+                select(DeadlineAlertModel).where(DeadlineAlertModel.id.in_(existing_deadline_uuids_as_uuid))
+            ).all()
+
+            if len(existing_alerts) != len(existing_deadline_uuids):
+                return None
+
+            matched_uuids: set[UUID] = set()
+            reused_uuids: list[str] = []
+
+            for deadline_alert in new_deadline_data:
+                deadline_data = deadline_alert.get(Encoding.VAR, deadline_alert)
+
+                found_match = False
+                for existing_alert in existing_alerts:
+                    if existing_alert.id in matched_uuids:
+                        continue  # Already matched to another new deadline
+
+                    if _definitions_match(deadline_data, existing_alert):
+                        # Found a match, reuse this UUID
+                        uuid_str = str(existing_alert.id)
+                        uuid_mapping[uuid_str] = (deadline_data, task_id)
+                        matched_uuids.add(existing_alert.id)
+                        reused_uuids.append(uuid_str)
+                        found_match = True
+                        new_name = deadline_data.get(DeadlineAlertFields.NAME)
+                        if new_name != existing_alert.name:
+                            name_updates[uuid_str] = new_name
+                        break
+
+                if not found_match:
+                    # Any mismatch triggers full regeneration of all UUIDs. This is intentional:
+                    # deadlines may be interdependent (e.g. a custom DeadlineReference relative
+                    # to another deadline), so partial reuse would risk stale cross-references.
+                    return None
+
+            pending_rewrites.append((carrier, reused_uuids))
+
+        # Every carrier matched — safe to rewrite now.
+        for carrier, reused_uuids in pending_rewrites:
+            carrier["deadline"] = reused_uuids
 
         return uuid_mapping, name_updates
 
@@ -505,20 +561,23 @@ class SerializedDagModel(Base):
     def _create_deadline_alert_records(
         cls,
         serialized_dag: SerializedDagModel,
-        uuid_mapping: dict[str, dict],
+        uuid_mapping: dict[str, tuple[dict, str | None]],
     ) -> None:
         """
         Create DeadlineAlert records in the database and appends them to serialized_dag.
 
         :param serialized_dag: The SerializedDagModel instance (not yet flushed)
-        :param uuid_mapping: Mapping of UUID strings to deadline alert data dicts
+        :param uuid_mapping: Mapping of UUID string → (deadline alert data dict, task_id). A
+            ``task_id`` of ``None`` marks a Dag-level deadline; otherwise the alert is stamped
+            with the task it applies to.
         """
         if not uuid_mapping:
             return
 
-        for uuid_str, deadline_data in uuid_mapping.items():
+        for uuid_str, (deadline_data, task_id) in uuid_mapping.items():
             alert = DeadlineAlertModel(
                 id=UUID(uuid_str),
+                task_id=task_id,
                 name=deadline_data.get(DeadlineAlertFields.NAME),
                 reference=deadline_data[DeadlineAlertFields.REFERENCE],
                 interval=deadline_data[DeadlineAlertFields.INTERVAL],
@@ -639,43 +698,37 @@ class SerializedDagModel(Base):
         dag_version = _prefetched.dag_version
 
         name_updated = False
-        if dag.data.get("dag", {}).get("deadline"):
+        if next(cls._iter_deadline_carriers(dag.data), None) is not None:
             # Try to reuse existing deadline UUIDs if the deadline definitions haven't changed.
             # This preserves the hash and avoids unnecessary SerializedDagModel recreations.
             existing_serialized_dag = session.scalar(
                 select(cls).where(cls.dag_id == dag.dag_id).order_by(cls.created_at.desc()).limit(1)
             )
 
-            if (
-                existing_serialized_dag
-                and existing_serialized_dag.data
-                and (existing_deadline_uuids := existing_serialized_dag.data.get("dag", {}).get("deadline"))
-            ):
+            reuse_result = None
+            if existing_serialized_dag and existing_serialized_dag.data:
                 reuse_result = cls._try_reuse_deadline_uuids(
-                    existing_deadline_uuids,
-                    dag.data["dag"]["deadline"],
+                    existing_serialized_dag.data,
+                    dag.data,
                     session,
                 )
 
-                if reuse_result is not None:
-                    deadline_uuid_mapping, name_updates = reuse_result
-                    # All deadlines matched — reuse the UUIDs to preserve hash.
-                    # Only issue UPDATE statements for rows whose name actually changed to
-                    # avoid unnecessary writes and to make the return value accurate.
-                    for uuid_str, new_name in name_updates.items():
-                        session.execute(
-                            update(DeadlineAlertModel)
-                            .where(DeadlineAlertModel.id == UUID(uuid_str))
-                            .values(name=new_name)
-                        )
-                    name_updated = bool(name_updates)
-                    dag.data["dag"]["deadline"] = existing_deadline_uuids
-                    deadline_uuid_mapping = {}
-                else:
-                    # At least one deadline has changed, generate new UUIDs and update the hash.
-                    deadline_uuid_mapping = cls._generate_deadline_uuids(dag.data)
+            if reuse_result is not None:
+                deadline_uuid_mapping, name_updates = reuse_result
+                # All deadlines matched — reuse the UUIDs to preserve hash.
+                # Only issue UPDATE statements for rows whose name actually changed to
+                # avoid unnecessary writes and to make the return value accurate.
+                for uuid_str, new_name in name_updates.items():
+                    session.execute(
+                        update(DeadlineAlertModel)
+                        .where(DeadlineAlertModel.id == UUID(uuid_str))
+                        .values(name=new_name)
+                    )
+                name_updated = bool(name_updates)
+                deadline_uuid_mapping = {}
             else:
-                # First time seeing this Dag with deadlines, generate new UUIDs and update the hash.
+                # First time seeing this Dag with deadlines, or at least one changed: generate
+                # new UUIDs and update the hash.
                 deadline_uuid_mapping = cls._generate_deadline_uuids(dag.data)
         else:
             deadline_uuid_mapping = {}

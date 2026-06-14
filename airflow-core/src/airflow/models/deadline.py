@@ -99,6 +99,12 @@ class Deadline(Base):
     )
     dagrun = relationship("DagRun", back_populates="deadlines")
 
+    # If the Deadline Alert is for a task, store the TaskInstance ID.
+    task_instance_id: Mapped[UUID | None] = mapped_column(
+        Uuid(), ForeignKey("task_instance.id", ondelete="CASCADE"), nullable=True
+    )
+    task_instance = relationship("TaskInstance", back_populates="deadlines")
+
     # The time after which the Deadline has passed and the callback should be triggered.
     deadline_time: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
 
@@ -120,20 +126,25 @@ class Deadline(Base):
     __table_args__ = (
         Index("deadline_missed_deadline_time_idx", missed, deadline_time, unique=False),
         Index("deadline_callback_id_idx", callback_id, unique=False),
+        Index("deadline_task_instance_id_idx", task_instance_id, unique=False),
     )
 
     def __init__(
         self,
         deadline_time: datetime,
         callback: CallbackDefinitionProtocol,
-        dagrun_id: int,
         deadline_alert_id: UUID | None,
+        dagrun_id: int | None = None,
+        task_instance_id: UUID | None = None,
         dag_id: str | None = None,
         bundle_name: str | None = None,
     ):
         super().__init__()
+        if (dagrun_id is None) == (task_instance_id is None):
+            raise ValueError("Deadline requires exactly one of dagrun_id or task_instance_id to be set.")
         self.deadline_time = deadline_time
         self.dagrun_id = dagrun_id
+        self.task_instance_id = task_instance_id
         self.missed = False
         self.callback = Callback.create_from_sdk_def(
             callback_def=callback, prefix=CALLBACK_METRICS_PREFIX, dag_id=dag_id
@@ -148,6 +159,13 @@ class Deadline(Base):
                 # The deadline is for a Dag run:
                 return "DagRun", f"Dag: {self.dagrun.dag_id} Run: {self.dagrun_id}"
 
+            if self.task_instance_id:
+                # The deadline is for a task instance:
+                return (
+                    "TaskInstance",
+                    f"Dag: {self.task_instance.dag_id} Task: {self.task_instance.task_id}",
+                )
+
             return "Unknown", ""
 
         resource_type, resource_details = _determine_resource()
@@ -161,18 +179,25 @@ class Deadline(Base):
         )
 
     @classmethod
-    def prune_deadlines(cls, *, session: Session, conditions: dict[Mapped, Any]) -> int:
+    def prune_deadlines(
+        cls, *, session: Session, conditions: dict[Mapped, Any], anchor_model: Any = None
+    ) -> int:
         """
         Remove deadlines from the table which match the provided conditions and return the number removed.
 
         NOTE: This should only be used to remove deadlines which are associated with
-            successful events (DagRuns, etc). If the deadline was missed, it will be
+            successful events (DagRuns, TaskInstances, etc). If the deadline was missed, it will be
             handled by the scheduler.
 
         :param conditions: Dictionary of conditions to evaluate against.
         :param session: Session to use.
+        :param anchor_model: The model the deadline is anchored to (DagRun or TaskInstance). Defaults to DagRun.
         """
         from airflow.models import DagRun  # Avoids circular import
+        from airflow.models.taskinstance import TaskInstance
+
+        if anchor_model is None:
+            anchor_model = DagRun
 
         # Assemble the filter conditions.
         filter_conditions = [column == value for column, value in conditions.items()]
@@ -180,59 +205,85 @@ class Deadline(Base):
             return 0
 
         try:
-            # Get deadlines which match the provided conditions and their associated DagRuns.
-            deadline_dagrun_pairs = session.execute(
-                select(Deadline, DagRun).join(DagRun).where(and_(*filter_conditions))
+            # Get deadlines which match the provided conditions and their associated anchors.
+            deadline_anchor_pairs = session.execute(
+                select(Deadline, anchor_model).join(anchor_model).where(and_(*filter_conditions))
             ).all()
 
         except AttributeError as e:
             logger.exception("Error resolving deadlines: %s", e)
             raise
 
-        if not deadline_dagrun_pairs:
+        if not deadline_anchor_pairs:
             return 0
 
         deleted_count = 0
-        dagruns_to_refresh = set()
+        anchors_to_refresh = set()
 
-        for deadline, dagrun in deadline_dagrun_pairs:
-            if dagrun.end_date is not None and dagrun.end_date <= deadline.deadline_time:
-                # If the DagRun finished before the Deadline:
+        for deadline, anchor in deadline_anchor_pairs:
+            if anchor.end_date is not None and anchor.end_date <= deadline.deadline_time:
+                # If the anchor finished before the Deadline:
                 session.delete(deadline)
-                stats.incr(
-                    "deadline_alerts.deadline_not_missed",
-                    tags={"dag_id": dagrun.dag_id, "dagrun_id": dagrun.run_id},
-                )
+                if anchor_model is TaskInstance:
+                    stats.incr(
+                        "deadline_alerts.deadline_not_missed",
+                        tags={"task_id": anchor.task_id, "run_id": anchor.run_id},
+                    )
+                else:
+                    stats.incr(
+                        "deadline_alerts.deadline_not_missed",
+                        tags={"dag_id": anchor.dag_id, "dagrun_id": anchor.run_id},
+                    )
                 deleted_count += 1
-                dagruns_to_refresh.add(dagrun)
+                anchors_to_refresh.add(anchor)
         session.flush()
 
         logger.debug("%d deadline records were deleted matching the conditions %s", deleted_count, conditions)
 
-        # Refresh any affected DAG runs.
-        for dagrun in dagruns_to_refresh:
-            session.refresh(dagrun)
+        # Refresh any affected anchors.
+        for anchor in anchors_to_refresh:
+            session.refresh(anchor)
 
         return deleted_count
 
     def handle_miss(self, session: Session):
         """Handle a missed deadline by queueing the callback."""
+        from sqlalchemy.orm import joinedload
+
+        from airflow.api_fastapi.core_api.datamodels.dag_run import DAGRunResponse
+        from airflow.models import DagRun
+        from airflow.models.taskinstance import TaskInstance
+
+        # TODO: Use the TaskAPI from within Triggerer to fetch full context instead of sending this context
+        #  from the scheduler
+
+        # Re-fetch the anchors from the database to avoid errors when the relationship fields are not in
+        # the current session. The TaskInstance is loaded with the relationships needed by
+        # TaskInstanceResponse, since they are configured with lazy="raise".
+        task_instance = None
+        if self.task_instance_id:
+            task_instance = session.scalar(
+                select(TaskInstance)
+                .where(TaskInstance.id == self.task_instance_id)
+                .options(joinedload(TaskInstance.rendered_task_instance_fields))
+                .options(joinedload(TaskInstance.dag_version))
+                .options(joinedload(TaskInstance.dag_run).options(joinedload(DagRun.dag_model)))
+            )
+        dagrun_id = self.dagrun_id or (task_instance.dag_run.id if task_instance else None)
+        dagrun = session.get(DagRun, dagrun_id) if dagrun_id else None
 
         def get_simple_context():
-            from airflow.api_fastapi.core_api.datamodels.dag_run import DAGRunResponse
-            from airflow.models import DagRun
+            from airflow.api_fastapi.core_api.datamodels.task_instances import TaskInstanceResponse
 
-            # TODO: Use the TaskAPI from within Triggerer to fetch full context instead of sending this context
-            #  from the scheduler
-
-            # Fetch the DagRun from the database again to avoid errors when self.dagrun's relationship fields
-            # are not in the current session.
-            dagrun = session.get(DagRun, self.dagrun_id)
-
-            return {
-                "dag_run": DAGRunResponse.model_validate(dagrun).model_dump(mode="json"),
+            context: dict[str, Any] = {
+                "dag_run": DAGRunResponse.model_validate(dagrun).model_dump(mode="json") if dagrun else None,
                 "deadline": {"id": self.id, "deadline_time": self.deadline_time},
             }
+            if task_instance is not None:
+                context["task_instance"] = TaskInstanceResponse.model_validate(task_instance).model_dump(
+                    mode="json"
+                )
+            return context
 
         if isinstance(self.callback, TriggererCallback):
             # Update the callback with context before queuing
@@ -253,8 +304,9 @@ class Deadline(Base):
                 "context": get_simple_context()
             }
             self.callback.data["deadline_id"] = str(self.id)
-            self.callback.data["dag_run_id"] = str(self.dagrun.id)
-            self.callback.data["dag_id"] = self.dagrun.dag_id
+            if dagrun is not None:
+                self.callback.data["dag_run_id"] = str(dagrun.id)
+                self.callback.data["dag_id"] = dagrun.dag_id
 
             self.callback.state = CallbackState.PENDING
             session.add(self.callback)
@@ -265,10 +317,16 @@ class Deadline(Base):
 
         self.missed = True
         session.add(self)
-        stats.incr(
-            "deadline_alerts.deadline_missed",
-            tags={"dag_id": self.dagrun.dag_id, "dagrun_id": self.dagrun.run_id},
-        )
+        if task_instance is not None:
+            stats.incr(
+                "deadline_alerts.deadline_missed",
+                tags={"task_id": task_instance.task_id, "run_id": task_instance.run_id},
+            )
+        elif dagrun is not None:
+            stats.incr(
+                "deadline_alerts.deadline_missed",
+                tags={"dag_id": dagrun.dag_id, "dagrun_id": dagrun.run_id},
+            )
 
 
 class ReferenceModels:

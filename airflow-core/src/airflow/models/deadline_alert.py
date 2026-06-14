@@ -27,6 +27,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from airflow._shared.timezones import timezone
 from airflow.models import Base
+from airflow.models.base import StringID
 from airflow.serialization.definitions.deadline import SerializedReferenceModels
 from airflow.utils.session import NEW_SESSION, provide_session
 from airflow.utils.sqlalchemy import UtcDateTime
@@ -46,6 +47,9 @@ class DeadlineAlert(Base):
     serialized_dag_id: Mapped[UUID] = mapped_column(
         Uuid(), ForeignKey("serialized_dag.id", ondelete="CASCADE"), nullable=False
     )
+
+    # If the DeadlineAlert is for a task, store the task_id it applies to.
+    task_id: Mapped[str | None] = mapped_column(StringID(), nullable=True)
 
     name: Mapped[str | None] = mapped_column(String(250), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -90,6 +94,7 @@ class DeadlineAlert(Base):
             self.reference == other.reference
             and self.interval == other.interval
             and self.callback_def == other.callback_def
+            and self.task_id == other.task_id
         )
 
     @property

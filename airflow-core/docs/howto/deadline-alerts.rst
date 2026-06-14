@@ -132,6 +132,20 @@ Airflow provides several built-in reference points that you can use with Deadlin
         # Strict: require exactly 15 runs to calculate
         DeadlineReference.AVERAGE_RUNTIME(max_runs=15, min_runs=15)
 
+The following references anchor on the timing of a single task instance and are used with a
+task-level deadline (see :ref:`task-level-deadline-alerts`):
+
+``DeadlineReference.TASKINSTANCE_QUEUED_AT``
+    Measures time from when the task instance was queued. Useful for monitoring queue or
+    resource pressure on a specific task.
+
+``DeadlineReference.TASKINSTANCE_SCHEDULED_AT``
+    Measures time from when the task instance was scheduled.
+
+``DeadlineReference.TASKINSTANCE_STARTED_AT``
+    Measures time from when the task instance started running. Useful for catching tasks that
+    run longer than expected once they begin.
+
 Here's an example using average runtime:
 
 .. code-block:: python
@@ -192,6 +206,90 @@ The timeline for this example would look like this:
 
 .. note::
     Note that since the interval is a negative value, the deadline is before the reference in this case.
+
+.. _task-level-deadline-alerts:
+
+Task-level Deadline Alerts
+--------------------------
+
+A ``DeadlineAlert`` can be attached to an individual task instead of the whole Dag. Pass a
+``DeadlineAlert`` (or a list of them) to the ``deadline`` parameter of an operator or a
+``@task``-decorated function. The alert is anchored on the timing of that single task instance
+rather than the Dag run, using one of the task-instance references:
+
+``DeadlineReference.TASKINSTANCE_QUEUED_AT``
+    Anchors on when the task instance was queued.
+
+``DeadlineReference.TASKINSTANCE_SCHEDULED_AT``
+    Anchors on when the task instance was scheduled.
+
+``DeadlineReference.TASKINSTANCE_STARTED_AT``
+    Anchors on when the task instance started running.
+
+The alert fires if the task hasn't finished by ``anchor_time + interval``. If the task finishes
+in time, the deadline is pruned and the callback never runs. Task-level deadlines are checked by
+the scheduler the same way Dag-level deadlines are, and they use the same
+:class:`~airflow.sdk.AsyncCallback` / :class:`~airflow.sdk.SyncCallback` callbacks.
+
+Here's an example using a traditional operator. If the task hasn't finished 30 minutes after it
+started running, send a Slack message:
+
+.. code-block:: python
+
+    from datetime import timedelta
+
+    from airflow.sdk import AsyncCallback, DAG, DeadlineAlert, DeadlineReference
+    from airflow.providers.slack.notifications.slack_webhook import SlackWebhookNotifier
+    from airflow.providers.standard.operators.bash import BashOperator
+
+    with DAG(dag_id="task_deadline_operator_example"):
+        BashOperator(
+            task_id="long_running_task",
+            bash_command="sleep 3600",
+            deadline=DeadlineAlert(
+                reference=DeadlineReference.TASKINSTANCE_STARTED_AT,
+                interval=timedelta(minutes=30),
+                callback=AsyncCallback(
+                    SlackWebhookNotifier,
+                    kwargs={"text": "🚨 Task missed its deadline at {{ deadline.deadline_time }}."},
+                ),
+            ),
+        )
+
+The same deadline attached to a ``@task``-decorated function:
+
+.. code-block:: python
+
+    import time
+    from datetime import timedelta
+
+    from airflow.sdk import AsyncCallback, DeadlineAlert, DeadlineReference, dag, task
+    from airflow.providers.slack.notifications.slack_webhook import SlackWebhookNotifier
+
+
+    @dag()
+    def task_deadline_taskflow_example():
+        @task(
+            deadline=DeadlineAlert(
+                reference=DeadlineReference.TASKINSTANCE_STARTED_AT,
+                interval=timedelta(minutes=30),
+                callback=AsyncCallback(
+                    SlackWebhookNotifier,
+                    kwargs={"text": "🚨 Task missed its deadline at {{ deadline.deadline_time }}."},
+                ),
+            )
+        )
+        def long_running_task():
+            time.sleep(3600)
+
+        long_running_task()
+
+
+    task_deadline_taskflow_example()
+
+Like the Dag-level ``deadline`` parameter, a task's ``deadline`` accepts either a single
+``DeadlineAlert`` or a list of them, so a task can have multiple alerts (for example, a warning
+followed by an escalation). Each alert is evaluated independently.
 
 Using Callbacks
 ---------------

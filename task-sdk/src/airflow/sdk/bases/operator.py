@@ -62,6 +62,7 @@ from airflow.sdk.definitions._internal.decorators import fixup_decorator_warning
 from airflow.sdk.definitions._internal.node import validate_key
 from airflow.sdk.definitions._internal.setup_teardown import SetupTeardownContext
 from airflow.sdk.definitions._internal.types import NOTSET, validate_instance_args
+from airflow.sdk.definitions.deadline import DeadlineAlert
 from airflow.sdk.definitions.edges import EdgeModifier
 from airflow.sdk.definitions.mappedoperator import OperatorPartial, validate_mapping_kwargs
 from airflow.sdk.definitions.param import ParamsDict
@@ -302,6 +303,7 @@ if TYPE_CHECKING:
         priority_weight: int = ...,
         weight_rule: WeightRuleParam = ...,
         sla: timedelta | None = ...,
+        deadline: DeadlineAlert | list[DeadlineAlert] | None = ...,
         map_index_template: str | None = ...,
         max_active_tis_per_dag: int | None = ...,
         max_active_tis_per_dagrun: int | None = ...,
@@ -392,6 +394,8 @@ else:
         partial_kwargs["max_retry_delay"] = BaseOperator._convert_max_retry_delay(
             partial_kwargs.get("max_retry_delay", None)
         )
+        if "deadline" in partial_kwargs:
+            partial_kwargs["deadline"] = BaseOperator._convert_deadline(partial_kwargs["deadline"])
 
         for k in ("execute", "failure", "success", "retry", "skipped"):
             partial_kwargs[attr] = _collect_from_input(partial_kwargs.get(attr := f"on_{k}_callback"))
@@ -765,6 +769,9 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         Values less than 1 are not allowed.
     :param sla: DEPRECATED - The SLA feature is removed in Airflow 3.0, to be replaced with a
         new implementation in Airflow >=3.1.
+    :param deadline: a :class:`~airflow.sdk.definitions.deadline.DeadlineAlert` (or list of them)
+        defining the need-by timestamp and callback to run for this task. This is the replacement
+        for the removed SLA feature.
     :param execution_timeout: max time allowed for the execution of
         this task instance, if it goes beyond it will raise and fail.
     :param on_failure_callback: a function or list of functions to be called when a task instance
@@ -888,6 +895,7 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
     queue: str = DEFAULT_QUEUE
     pool: str = DEFAULT_POOL_NAME
     pool_slots: int = DEFAULT_POOL_SLOTS
+    deadline: list[DeadlineAlert] | None = None
     execution_timeout: timedelta | None = DEFAULT_TASK_EXECUTION_TIMEOUT
     on_execute_callback: Sequence[TaskStateChangeCallback] = ()
     on_failure_callback: Sequence[TaskStateChangeCallback] = ()
@@ -1054,6 +1062,7 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         pool: str | None = None,
         pool_slots: int = DEFAULT_POOL_SLOTS,
         sla: timedelta | None = None,
+        deadline: DeadlineAlert | list[DeadlineAlert] | None = None,
         execution_timeout: timedelta | None = DEFAULT_TASK_EXECUTION_TIMEOUT,
         on_execute_callback: None | TaskStateChangeCallback | Collection[TaskStateChangeCallback] = None,
         on_failure_callback: None | TaskStateChangeCallback | list[TaskStateChangeCallback] = None,
@@ -1164,6 +1173,8 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
                 "The SLA feature is removed in Airflow 3.0, replaced with Deadline Alerts in >=3.1",
                 stacklevel=2,
             )
+        # Converted to a list by setattr
+        self.deadline = deadline  # type: ignore[assignment]
 
         try:
             TriggerRule(trigger_rule)
@@ -1394,6 +1405,17 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
 
     _convert_retry_delay = _convert_timedelta
     _convert_max_retry_delay = _convert_timedelta
+
+    @staticmethod
+    def _convert_deadline(
+        deadline: DeadlineAlert | list[DeadlineAlert] | None,
+    ) -> list[DeadlineAlert] | None:
+        """Convert deadline parameter to a list of DeadlineAlert objects."""
+        if deadline is None:
+            return None
+        if isinstance(deadline, DeadlineAlert):
+            return [deadline]
+        return list(deadline)
 
     @staticmethod
     def _convert_resources(resources: dict[str, Any] | None) -> Resources | None:

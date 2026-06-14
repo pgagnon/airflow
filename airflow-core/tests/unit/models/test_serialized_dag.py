@@ -912,3 +912,300 @@ class TestSerializedDagModel:
 
         # The name must have been updated in the DB.
         assert updated_alert.name == "updated name"
+
+    def test_task_deadline_creates_alert_with_task_id(self, testing_dag_bundle, session):
+        """Writing a Dag whose task carries a deadline creates a DeadlineAlert row stamped with task_id."""
+        dag_id = "test_task_deadline_create"
+        dag = DAG(dag_id=dag_id)
+        EmptyOperator(
+            task_id="task_with_deadline",
+            dag=dag,
+            deadline=DeadlineAlert(
+                reference=DeadlineReference.TASKINSTANCE_STARTED_AT,
+                interval=timedelta(minutes=5),
+                callback=AsyncCallback(empty_callback_for_deadline),
+            ),
+        )
+        sync_dag_to_db(dag, session=session)
+        session.commit()
+
+        serdag = session.scalar(select(SDM).where(SDM.dag_id == dag_id).order_by(SDM.created_at.desc()))
+        alerts = session.scalars(select(DAM).where(DAM.serialized_dag_id == serdag.id)).all()
+
+        assert len(alerts) == 1
+        assert alerts[0].task_id == "task_with_deadline"
+
+    def test_task_deadline_reuses_alert_row(self, testing_dag_bundle, session):
+        """Re-writing the same Dag reuses the existing task alert row (no duplicate)."""
+        dag_id = "test_task_deadline_reuse"
+
+        def build_dag():
+            dag = DAG(dag_id=dag_id)
+            EmptyOperator(
+                task_id="task_with_deadline",
+                dag=dag,
+                deadline=DeadlineAlert(
+                    reference=DeadlineReference.TASKINSTANCE_STARTED_AT,
+                    interval=timedelta(minutes=5),
+                    callback=AsyncCallback(empty_callback_for_deadline),
+                ),
+            )
+            return dag
+
+        sync_dag_to_db(build_dag(), session=session)
+        session.commit()
+        first_serdag = session.scalar(select(SDM).where(SDM.dag_id == dag_id).order_by(SDM.created_at.desc()))
+        first_alert = session.scalar(select(DAM).where(DAM.serialized_dag_id == first_serdag.id))
+        first_uuid = first_alert.id
+
+        SDM.write_dag(LazyDeserializedDAG.from_dag(build_dag()), bundle_name="testing", session=session)
+        session.commit()
+
+        serdag_count = session.scalar(select(func.count()).select_from(SDM).where(SDM.dag_id == dag_id))
+        alert_count = session.scalar(
+            select(func.count()).select_from(DAM).where(DAM.task_id == "task_with_deadline")
+        )
+
+        assert serdag_count == 1
+        assert alert_count == 1
+        latest_serdag = session.scalar(
+            select(SDM).where(SDM.dag_id == dag_id).order_by(SDM.created_at.desc())
+        )
+        reused_alert = session.scalar(select(DAM).where(DAM.serialized_dag_id == latest_serdag.id))
+        assert reused_alert.id == first_uuid
+
+    def test_task_and_dag_deadline_get_distinct_rows(self, testing_dag_bundle, session):
+        """A task alert and a DAG-level alert with identical definitions get distinct rows."""
+        dag_id = "test_task_dag_deadline_distinct"
+        shared_alert_kwargs = dict(
+            reference=DeadlineReference.TASKINSTANCE_STARTED_AT,
+            interval=timedelta(minutes=5),
+            callback=AsyncCallback(empty_callback_for_deadline),
+        )
+        dag = DAG(dag_id=dag_id, deadline=DeadlineAlert(**shared_alert_kwargs))
+        EmptyOperator(
+            task_id="task_with_deadline",
+            dag=dag,
+            deadline=DeadlineAlert(**shared_alert_kwargs),
+        )
+        sync_dag_to_db(dag, session=session)
+        session.commit()
+
+        serdag = session.scalar(select(SDM).where(SDM.dag_id == dag_id).order_by(SDM.created_at.desc()))
+        alerts = session.scalars(select(DAM).where(DAM.serialized_dag_id == serdag.id)).all()
+
+        assert len(alerts) == 2
+        task_ids = {alert.task_id for alert in alerts}
+        assert task_ids == {None, "task_with_deadline"}
+
+    def test_changing_one_task_deadline_regenerates_when_another_carrier_matches(
+        self, testing_dag_bundle, session
+    ):
+        """A changed task deadline regenerates even when an earlier carrier still matches.
+
+        The Dag-level deadline (processed first) is unchanged and matches its existing row,
+        while the task deadline changes. Reuse must bail out without leaving the matched
+        Dag carrier rewritten to UUID strings, otherwise the regeneration fallback fails.
+        """
+        dag_id = "test_task_deadline_partial_reuse"
+
+        def build_dag(task_interval):
+            dag = DAG(
+                dag_id=dag_id,
+                deadline=DeadlineAlert(
+                    reference=DeadlineReference.DAGRUN_LOGICAL_DATE,
+                    interval=timedelta(minutes=5),
+                    callback=AsyncCallback(empty_callback_for_deadline),
+                ),
+            )
+            EmptyOperator(
+                task_id="task_with_deadline",
+                dag=dag,
+                deadline=DeadlineAlert(
+                    reference=DeadlineReference.TASKINSTANCE_STARTED_AT,
+                    interval=task_interval,
+                    callback=AsyncCallback(empty_callback_for_deadline),
+                ),
+            )
+            return dag
+
+        sync_dag_to_db(build_dag(timedelta(minutes=5)), session=session)
+        session.commit()
+
+        # Re-write with the task deadline interval changed; the Dag deadline is identical.
+        SDM.write_dag(
+            LazyDeserializedDAG.from_dag(build_dag(timedelta(minutes=30))),
+            bundle_name="testing",
+            session=session,
+        )
+        session.commit()
+
+        serdag = session.scalar(select(SDM).where(SDM.dag_id == dag_id).order_by(SDM.created_at.desc()))
+        alerts = session.scalars(select(DAM).where(DAM.serialized_dag_id == serdag.id)).all()
+        task_alert = next(alert for alert in alerts if alert.task_id == "task_with_deadline")
+        assert task_alert.interval["__data__"] == timedelta(minutes=30).total_seconds()
+
+
+class TestProcessTaskInstanceDeadlineAlerts:
+    """Materialization of task-level Deadline rows from DeadlineAlert templates."""
+
+    pytestmark = pytest.mark.db_test
+
+    @staticmethod
+    def _make_ti(dag_maker, session, reference):
+        from airflow.models.taskinstance import TaskInstance
+
+        dag_id = f"test_ti_deadline_{reference.__class__.__name__}"
+        dag = DAG(dag_id=dag_id)
+        EmptyOperator(
+            task_id="task_with_deadline",
+            dag=dag,
+            deadline=DeadlineAlert(
+                reference=reference,
+                interval=timedelta(minutes=5),
+                callback=AsyncCallback(empty_callback_for_deadline),
+            ),
+        )
+        scheduler_dag = sync_dag_to_db(dag, session=session)
+        session.flush()
+        dr = scheduler_dag.create_dagrun(
+            run_id="test_run",
+            run_after=DEFAULT_DATE,
+            logical_date=DEFAULT_DATE,
+            data_interval=(DEFAULT_DATE, DEFAULT_DATE),
+            state=DagRunState.RUNNING,
+            run_type=DagRunType.MANUAL,
+            triggered_by=DagRunTriggeredByType.TEST,
+            session=session,
+        )
+        session.flush()
+        ti = session.scalars(select(TaskInstance).where(TaskInstance.run_id == dr.run_id)).one()
+        return ti
+
+    def test_queued_bucket_materializes_queued_deadline(self, dag_maker, session):
+        from airflow._shared.timezones import timezone
+        from airflow.models.deadline import Deadline
+        from airflow.serialization.definitions.dag import _process_taskinstance_deadline_alerts
+        from airflow.serialization.definitions.deadline import SerializedReferenceModels
+
+        ti = self._make_ti(dag_maker, session, DeadlineReference.TASKINSTANCE_QUEUED_AT)
+        queued_at = timezone.utcnow()
+        ti.queued_dttm = queued_at
+        session.flush()
+
+        _process_taskinstance_deadline_alerts(
+            [ti], bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_QUEUED, session=session
+        )
+        session.flush()
+
+        deadlines = session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
+        assert len(deadlines) == 1
+        assert deadlines[0].deadline_time == queued_at + timedelta(minutes=5)
+
+    def test_scheduled_deadline_uses_scheduled_bucket_not_queued(self, dag_maker, session):
+        """A scheduled-at deadline materializes under TASKINSTANCE_SCHEDULED, not TASKINSTANCE_QUEUED."""
+        from airflow._shared.timezones import timezone
+        from airflow.models.deadline import Deadline
+        from airflow.serialization.definitions.dag import _process_taskinstance_deadline_alerts
+        from airflow.serialization.definitions.deadline import SerializedReferenceModels
+
+        ti = self._make_ti(dag_maker, session, DeadlineReference.TASKINSTANCE_SCHEDULED_AT)
+        scheduled_at = timezone.utcnow()
+        ti.scheduled_dttm = scheduled_at
+        session.flush()
+
+        # The queued bucket must not pick up a scheduled-at deadline.
+        _process_taskinstance_deadline_alerts(
+            [ti], bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_QUEUED, session=session
+        )
+        session.flush()
+        assert session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all() == []
+
+        # The scheduled bucket materializes it from scheduled_dttm.
+        _process_taskinstance_deadline_alerts(
+            [ti], bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_SCHEDULED, session=session
+        )
+        session.flush()
+        deadlines = session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
+        assert len(deadlines) == 1
+        assert deadlines[0].deadline_time == scheduled_at + timedelta(minutes=5)
+
+    def test_started_deadline_skipped_at_queue_but_materialized_at_start(self, dag_maker, session):
+        from airflow._shared.timezones import timezone
+        from airflow.models.deadline import Deadline
+        from airflow.serialization.definitions.dag import _process_taskinstance_deadline_alerts
+        from airflow.serialization.definitions.deadline import SerializedReferenceModels
+
+        ti = self._make_ti(dag_maker, session, DeadlineReference.TASKINSTANCE_STARTED_AT)
+        ti.queued_dttm = timezone.utcnow()
+        session.flush()
+
+        # Wrong bucket at queue time -> nothing materializes.
+        _process_taskinstance_deadline_alerts(
+            [ti], bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_QUEUED, session=session
+        )
+        session.flush()
+        assert session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all() == []
+
+        # Once started, the STARTED bucket materializes it.
+        started_at = timezone.utcnow()
+        ti.start_date = started_at
+        session.flush()
+        _process_taskinstance_deadline_alerts(
+            [ti], bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_STARTED, session=session
+        )
+        session.flush()
+
+        deadlines = session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
+        assert len(deadlines) == 1
+        assert deadlines[0].deadline_time == started_at + timedelta(minutes=5)
+
+    def test_no_task_deadlines_short_circuits_without_per_ti_queries(self, dag_maker, session):
+        """A batch of task instances with no task-level alerts must not query per task instance."""
+        from airflow.models.taskinstance import TaskInstance
+        from airflow.serialization.definitions.dag import _process_taskinstance_deadline_alerts
+        from airflow.serialization.definitions.deadline import SerializedReferenceModels
+
+        dag = DAG(dag_id="test_ti_deadline_none")
+        EmptyOperator(task_id="plain_task", dag=dag)
+        scheduler_dag = sync_dag_to_db(dag, session=session)
+        session.flush()
+        dr = scheduler_dag.create_dagrun(
+            run_id="test_run",
+            run_after=DEFAULT_DATE,
+            logical_date=DEFAULT_DATE,
+            data_interval=(DEFAULT_DATE, DEFAULT_DATE),
+            state=DagRunState.RUNNING,
+            run_type=DagRunType.MANUAL,
+            triggered_by=DagRunTriggeredByType.TEST,
+            session=session,
+        )
+        session.flush()
+        tis = session.scalars(select(TaskInstance).where(TaskInstance.run_id == dr.run_id)).all()
+
+        # Two batched discovery queries (dag_version -> serialized_dag, then alerts); the
+        # empty alert result short-circuits before any per-task-instance work.
+        with mock.patch.object(session, "scalar", wraps=session.scalar) as scalar_spy:
+            _process_taskinstance_deadline_alerts(
+                tis, bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_QUEUED, session=session
+            )
+        assert scalar_spy.call_count == 0
+
+    def test_materializer_is_idempotent(self, dag_maker, session):
+        from airflow._shared.timezones import timezone
+        from airflow.models.deadline import Deadline
+        from airflow.serialization.definitions.dag import _process_taskinstance_deadline_alerts
+        from airflow.serialization.definitions.deadline import SerializedReferenceModels
+
+        ti = self._make_ti(dag_maker, session, DeadlineReference.TASKINSTANCE_QUEUED_AT)
+        ti.queued_dttm = timezone.utcnow()
+        session.flush()
+
+        for _ in range(2):
+            _process_taskinstance_deadline_alerts(
+                [ti], bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_QUEUED, session=session
+            )
+            session.flush()
+
+        deadlines = session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
+        assert len(deadlines) == 1

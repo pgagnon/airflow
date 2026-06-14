@@ -187,6 +187,39 @@ class SerializedReferenceModels:
 
             return _fetch_from_db(DagRun.queued_at, session=session, **kwargs)
 
+    class TaskInstanceQueuedAtDeadline(SerializedBaseDeadlineReference):
+        """A deadline that returns when a TaskInstance was queued."""
+
+        required_kwargs = {"dag_id", "run_id", "task_id", "map_index"}
+
+        def _evaluate_with(self, *, session: Session, **kwargs: Any) -> datetime | None:
+            from airflow.models.deadline import _fetch_from_db
+            from airflow.models.taskinstance import TaskInstance
+
+            return _fetch_from_db(TaskInstance.queued_dttm, session=session, **kwargs)
+
+    class TaskInstanceScheduledAtDeadline(SerializedBaseDeadlineReference):
+        """A deadline that returns when a TaskInstance was scheduled."""
+
+        required_kwargs = {"dag_id", "run_id", "task_id", "map_index"}
+
+        def _evaluate_with(self, *, session: Session, **kwargs: Any) -> datetime | None:
+            from airflow.models.deadline import _fetch_from_db
+            from airflow.models.taskinstance import TaskInstance
+
+            return _fetch_from_db(TaskInstance.scheduled_dttm, session=session, **kwargs)
+
+    class TaskInstanceStartedAtDeadline(SerializedBaseDeadlineReference):
+        """A deadline that returns when a TaskInstance started."""
+
+        required_kwargs = {"dag_id", "run_id", "task_id", "map_index"}
+
+        def _evaluate_with(self, *, session: Session, **kwargs: Any) -> datetime | None:
+            from airflow.models.deadline import _fetch_from_db
+            from airflow.models.taskinstance import TaskInstance
+
+            return _fetch_from_db(TaskInstance.start_date, session=session, **kwargs)
+
     @dataclass
     class AverageRuntimeDeadline(SerializedBaseDeadlineReference):
         """A deadline that calculates the average runtime from past DAG runs."""
@@ -335,6 +368,18 @@ class SerializedReferenceModels:
         # All DagRun-related deadline types.
         DAGRUN: tuple = ()
 
+        # Deadlines that should be created when the TaskInstance is scheduled.
+        TASKINSTANCE_SCHEDULED: tuple = ()
+
+        # Deadlines that should be created when the TaskInstance is queued.
+        TASKINSTANCE_QUEUED: tuple = ()
+
+        # Deadlines that should be created when the TaskInstance starts.
+        TASKINSTANCE_STARTED: tuple = ()
+
+        # All TaskInstance-related deadline types.
+        TASKINSTANCE: tuple = ()
+
 
 SerializedReferenceModels.TYPES.DAGRUN_CREATED = (
     SerializedReferenceModels.DagRunLogicalDateDeadline,
@@ -346,6 +391,20 @@ SerializedReferenceModels.TYPES.DAGRUN = (
     *SerializedReferenceModels.TYPES.DAGRUN_CREATED,
     *SerializedReferenceModels.TYPES.DAGRUN_QUEUED,
     SerializedReferenceModels.SerializedCustomReference,
+)
+SerializedReferenceModels.TYPES.TASKINSTANCE_SCHEDULED = (
+    SerializedReferenceModels.TaskInstanceScheduledAtDeadline,
+)
+SerializedReferenceModels.TYPES.TASKINSTANCE_QUEUED = (
+    SerializedReferenceModels.TaskInstanceQueuedAtDeadline,
+)
+SerializedReferenceModels.TYPES.TASKINSTANCE_STARTED = (
+    SerializedReferenceModels.TaskInstanceStartedAtDeadline,
+)
+SerializedReferenceModels.TYPES.TASKINSTANCE = (
+    *SerializedReferenceModels.TYPES.TASKINSTANCE_SCHEDULED,
+    *SerializedReferenceModels.TYPES.TASKINSTANCE_QUEUED,
+    *SerializedReferenceModels.TYPES.TASKINSTANCE_STARTED,
 )
 
 

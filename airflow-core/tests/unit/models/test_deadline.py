@@ -25,6 +25,7 @@ import pytest
 import time_machine
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
+from uuid6 import uuid7
 
 from airflow.api_fastapi.core_api.datamodels.dag_run import DAGRunResponse
 from airflow.models import DagRun
@@ -115,6 +116,14 @@ def dagrun(session, dag_maker):
 
 
 @pytest.fixture
+def task_instance(dagrun, session):
+    from airflow.models.taskinstance import TaskInstance
+
+    ti = session.scalars(select(TaskInstance).where(TaskInstance.run_id == dagrun.run_id)).one()
+    return ti
+
+
+@pytest.fixture
 def deadline_orm(dagrun, session):
     with time_machine.travel(DEFAULT_DATE, tick=False):
         deadline = Deadline(
@@ -178,6 +187,66 @@ class TestDeadline:
             mock_session.delete.assert_called_once_with(mock_deadline)
         else:
             mock_session.execute.assert_not_called()
+
+    def test_prune_deadlines_task_instance_anchor(self, task_instance, session):
+        """A TI that finished on or before its deadline is pruned; a breached one is kept."""
+        from airflow.models.taskinstance import TaskInstance
+
+        task_instance.end_date = DEFAULT_DATE
+        session.flush()
+
+        # The TI finished before this deadline, so it was not missed and should be pruned.
+        not_missed = Deadline(
+            deadline_time=DEFAULT_DATE + timedelta(hours=1),
+            callback=AsyncCallback(TEST_CALLBACK_PATH),
+            task_instance_id=task_instance.id,
+            deadline_alert_id=None,
+        )
+        # The TI finished after this deadline, so it was missed and should be kept for the scheduler.
+        missed = Deadline(
+            deadline_time=DEFAULT_DATE - timedelta(hours=1),
+            callback=AsyncCallback(TEST_CALLBACK_PATH),
+            task_instance_id=task_instance.id,
+            deadline_alert_id=None,
+        )
+        session.add_all([not_missed, missed])
+        session.flush()
+
+        removed = Deadline.prune_deadlines(
+            session=session,
+            conditions={TaskInstance.id: task_instance.id},
+            anchor_model=TaskInstance,
+        )
+
+        assert removed == 1
+        remaining = session.scalars(select(Deadline)).all()
+        assert remaining == [missed]
+
+    def test_init_requires_exactly_one_anchor(self):
+        ti_id = uuid7()
+        with pytest.raises(ValueError, match="exactly one of"):
+            Deadline(
+                deadline_time=DEFAULT_DATE,
+                callback=AsyncCallback(TEST_CALLBACK_PATH),
+                deadline_alert_id=None,
+            )
+        with pytest.raises(ValueError, match="exactly one of"):
+            Deadline(
+                deadline_time=DEFAULT_DATE,
+                callback=AsyncCallback(TEST_CALLBACK_PATH),
+                dagrun_id=1,
+                task_instance_id=ti_id,
+                deadline_alert_id=None,
+            )
+
+        deadline = Deadline(
+            deadline_time=DEFAULT_DATE,
+            callback=AsyncCallback(TEST_CALLBACK_PATH),
+            task_instance_id=ti_id,
+            deadline_alert_id=None,
+        )
+        assert deadline.task_instance_id == ti_id
+        assert deadline.dagrun_id is None
 
     def test_repr_with_callback_kwargs(self, deadline_orm, dagrun):
         repr_str = repr(deadline_orm)
@@ -253,6 +322,34 @@ class TestDeadline:
         assert context["deadline"]["id"] == deadline_orm.id
         assert context["deadline"]["deadline_time"].timestamp() == deadline_orm.deadline_time.timestamp()
         assert context["dag_run"] == DAGRunResponse.model_validate(dagrun).model_dump(mode="json")
+
+    @pytest.mark.db_test
+    def test_handle_miss_task_instance(self, task_instance, dagrun, session):
+        from airflow.api_fastapi.core_api.datamodels.task_instances import TaskInstanceResponse
+
+        deadline_orm = Deadline(
+            deadline_time=DEFAULT_DATE,
+            callback=AsyncCallback(TEST_CALLBACK_PATH, TEST_CALLBACK_KWARGS),
+            task_instance_id=task_instance.id,
+            dag_id=task_instance.dag_id,
+            deadline_alert_id=None,
+        )
+        session.add(deadline_orm)
+        session.flush()
+        assert not deadline_orm.missed
+
+        with mock.patch.object(deadline_orm.callback, "queue") as mock_queue:
+            deadline_orm.handle_miss(session)
+            session.flush()
+            mock_queue.assert_called_once()
+
+        assert deadline_orm.missed
+
+        context = deadline_orm.callback.data["kwargs"]["context"]
+        assert context["dag_run"] == DAGRunResponse.model_validate(dagrun).model_dump(mode="json")
+        assert context["task_instance"] == TaskInstanceResponse.model_validate(task_instance).model_dump(
+            mode="json"
+        )
 
 
 @pytest.mark.db_test
@@ -509,6 +606,50 @@ class TestCalculatedDeadlineDatabaseCalls:
             result = reference.evaluate_with(session=session, interval=interval, dag_id=DAG_ID)
             assert result is None
 
+    @pytest.mark.parametrize(
+        ("reference", "expected_column_name"),
+        [
+            pytest.param(
+                SerializedReferenceModels.TaskInstanceQueuedAtDeadline(), "queued_dttm", id="ti_queued_at"
+            ),
+            pytest.param(
+                SerializedReferenceModels.TaskInstanceScheduledAtDeadline(),
+                "scheduled_dttm",
+                id="ti_scheduled_at",
+            ),
+            pytest.param(
+                SerializedReferenceModels.TaskInstanceStartedAtDeadline(), "start_date", id="ti_started_at"
+            ),
+        ],
+    )
+    def test_taskinstance_deadline_database_integration(self, reference, expected_column_name, session):
+        """TaskInstance deadlines call the generic _fetch_from_db with the right column."""
+        from airflow.models.taskinstance import TaskInstance
+
+        conditions = {"dag_id": DAG_ID, "run_id": "dagrun_1", "task_id": "TASK_ID", "map_index": -1}
+        interval = timedelta(hours=1)
+        expected_column = getattr(TaskInstance, expected_column_name)
+
+        with mock.patch("airflow.models.deadline._fetch_from_db") as mock_fetch:
+            mock_fetch.return_value = DEFAULT_DATE
+            result = reference.evaluate_with(session=session, interval=interval, **conditions)
+
+        mock_fetch.assert_called_once_with(expected_column, session=session, **conditions)
+        assert result == DEFAULT_DATE + interval
+
+    @pytest.mark.parametrize(
+        "reference",
+        [
+            pytest.param(SerializedReferenceModels.TaskInstanceQueuedAtDeadline(), id="ti_queued_at"),
+            pytest.param(SerializedReferenceModels.TaskInstanceScheduledAtDeadline(), id="ti_scheduled_at"),
+            pytest.param(SerializedReferenceModels.TaskInstanceStartedAtDeadline(), id="ti_started_at"),
+        ],
+    )
+    def test_taskinstance_deadline_missing_required_kwargs(self, reference, session):
+        assert reference.required_kwargs == {"dag_id", "run_id", "task_id", "map_index"}
+        with pytest.raises(ValueError, match="is missing required parameters"):
+            reference.evaluate_with(session=session, interval=timedelta(hours=1), dag_id=DAG_ID)
+
     def test_average_runtime_min_runs_validation(self):
         """Test that min_runs must be at least 1."""
         with pytest.raises(ValueError, match="min_runs must be at least 1"):
@@ -668,6 +809,18 @@ class TestCustomDeadlineReference:
             ),
         ):
             DeadlineReference.register_custom_reference(self.MyCustomRef, invalid_timing)
+
+    @pytest.mark.parametrize(
+        "taskinstance_timing",
+        [
+            pytest.param(DeadlineReference.TYPES.TASKINSTANCE_SCHEDULED, id="taskinstance_scheduled"),
+            pytest.param(DeadlineReference.TYPES.TASKINSTANCE_QUEUED, id="taskinstance_queued"),
+            pytest.param(DeadlineReference.TYPES.TASKINSTANCE_STARTED, id="taskinstance_started"),
+        ],
+    )
+    def test_register_custom_reference_rejects_taskinstance_buckets(self, taskinstance_timing):
+        with pytest.raises(ValueError, match="Custom task-level deadline references are not yet supported"):
+            DeadlineReference.register_custom_reference(self.MyCustomRef, taskinstance_timing)
 
     def test_custom_reference_discoverable_on_deadline_reference(self):
         # Custom references are only registered on DeadlineReference, not on ReferenceModels.

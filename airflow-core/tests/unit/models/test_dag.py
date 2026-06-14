@@ -2258,6 +2258,48 @@ my_postgres_conn:
         assert len(dr.deadlines) == 1
         assert dr.deadlines[0].deadline_time == getattr(dr, reference_column, DEFAULT_DATE) + interval
 
+    @pytest.mark.need_serialized_dag
+    def test_dagrun_deadline_ignores_task_level_alerts(self, testing_dag_bundle, session):
+        """DagRun materialization consumes only Dag-level alerts; task-level alerts are skipped.
+
+        The DAG carries one Dag-level deadline and one task-level deadline. Creating a DagRun
+        must produce exactly one deadline (the Dag-level one), never the task-level alert.
+        """
+        dag = DAG(
+            dag_id="test_task_deadline_not_dagrun",
+            schedule=datetime.timedelta(days=1),
+            deadline=DeadlineAlert(
+                reference=DeadlineReference.DAGRUN_QUEUED_AT,
+                interval=datetime.timedelta(hours=1),
+                callback=AsyncCallback(empty_callback_for_deadline),
+            ),
+        )
+        EmptyOperator(
+            task_id="task_1",
+            dag=dag,
+            deadline=DeadlineAlert(
+                reference=DeadlineReference.TASKINSTANCE_STARTED_AT,
+                interval=datetime.timedelta(hours=1),
+                callback=AsyncCallback(empty_callback_for_deadline),
+            ),
+        )
+
+        scheduler_dag = sync_dag_to_db(dag, session=session)
+        dr = scheduler_dag.create_dagrun(
+            run_id="test_task_deadline_not_dagrun_run",
+            run_type=DagRunType.SCHEDULED,
+            state=State.QUEUED,
+            logical_date=TEST_DATE,
+            run_after=TEST_DATE,
+            triggered_by=DagRunTriggeredByType.TEST,
+        )
+        session.flush()
+        dr = session.merge(dr)
+
+        # Exactly the Dag-level deadline is materialized; the task-level alert is not.
+        assert len(dr.deadlines) == 1
+        assert dr.deadlines[0].deadline_time == dr.queued_at + datetime.timedelta(hours=1)
+
     def test_dag_with_multiple_deadlines(self, testing_dag_bundle, session):
         """Test that a Dag with multiple deadlines stores all deadlines and persists on re-serialization."""
         deadlines = [

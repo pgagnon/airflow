@@ -289,6 +289,71 @@ class TestTIRunState:
         )
         assert response.status_code == 409
 
+    def test_ti_run_materializes_started_task_deadline(
+        self, client, session, create_task_instance, time_machine
+    ):
+        """Marking a TI running materializes a Deadline for its TASKINSTANCE_STARTED_AT alert."""
+        from datetime import timedelta
+
+        from airflow.models.deadline import Deadline
+        from airflow.models.deadline_alert import DeadlineAlert
+        from airflow.models.serialized_dag import SerializedDagModel
+        from airflow.sdk.definitions.callback import AsyncCallback
+        from airflow.sdk.definitions.deadline import DeadlineAlert as SDKDeadlineAlert, DeadlineReference
+        from airflow.serialization.encoders import encode_deadline_alert
+
+        instant_str = "2024-09-30T12:00:00Z"
+        instant = timezone.parse(instant_str)
+        time_machine.move_to(instant, tick=False)
+
+        ti = create_task_instance(
+            task_id="started_deadline_task",
+            state=State.QUEUED,
+            dagrun_state=DagRunState.RUNNING,
+            session=session,
+            start_date=instant,
+            dag_id=str(uuid4()),
+        )
+        session.commit()
+
+        encoded = encode_deadline_alert(
+            SDKDeadlineAlert(
+                reference=DeadlineReference.TASKINSTANCE_STARTED_AT,
+                interval=timedelta(minutes=5),
+                callback=AsyncCallback("classpath.notify"),
+            )
+        )
+        serialized_dag = session.scalar(
+            select(SerializedDagModel).where(SerializedDagModel.dag_id == ti.dag_id)
+        )
+        session.add(
+            DeadlineAlert(
+                serialized_dag_id=serialized_dag.id,
+                task_id="started_deadline_task",
+                name=encoded["name"],
+                reference=encoded["reference"],
+                interval=encoded["interval"],
+                callback_def=encoded["callback"],
+            )
+        )
+        session.commit()
+
+        response = client.patch(
+            f"/execution/task-instances/{ti.id}/run",
+            json={
+                "state": "running",
+                "hostname": "h",
+                "unixname": "u",
+                "pid": 100,
+                "start_date": instant_str,
+            },
+        )
+        assert response.status_code == 200
+
+        deadlines = session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
+        assert len(deadlines) == 1
+        assert deadlines[0].deadline_time == instant + timedelta(minutes=5)
+
     def test_ti_run_returns_execution_token(
         self, client, exec_app, session, create_task_instance, time_machine
     ):

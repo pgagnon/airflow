@@ -1070,6 +1070,11 @@ class OperatorSerialization(DAGNode, BaseSerialization):
         if op.params:
             serialize_op["params"] = cls._serialize_params_dict(op.params)
 
+        deadline = getattr(op, "deadline", None)
+        if deadline:
+            deadline_list = deadline if isinstance(deadline, list) else [deadline]
+            serialize_op["deadline"] = [encode_deadline_alert(alert) for alert in deadline_list]
+
         return serialize_op
 
     @classmethod
@@ -1140,6 +1145,16 @@ class OperatorSerialization(DAGNode, BaseSerialization):
 
             elif k == "params":
                 v = cls._deserialize_params_dict(v)
+            elif k == "deadline":
+                # After template persistence each entry is a DeadlineAlert UUID string resolved
+                # from the deadline_alert table at materialization time; before persistence (e.g.
+                # a direct serialize/deserialize round-trip) they are encoded alert dicts.
+                if not v:
+                    v = None
+                elif isinstance(v[0], str):
+                    pass  # UUID strings, leave as-is for materialization to resolve
+                else:
+                    v = [decode_deadline_alert(alert) for alert in v]
             elif k == "partial_kwargs":
                 # Use unified deserializer that supports both encoded and non-encoded values
                 v = cls._deserialize_partial_kwargs(v, client_defaults)

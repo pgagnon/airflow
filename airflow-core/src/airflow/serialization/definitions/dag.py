@@ -24,6 +24,7 @@ import itertools
 import operator
 import re
 import weakref
+from collections import defaultdict
 from typing import TYPE_CHECKING, TypedDict, cast, overload
 
 import attrs
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
     import datetime
     from collections.abc import Collection, Iterable, Sequence
     from typing import Any, Literal
+    from uuid import UUID
 
     from pendulum.tz.timezone import FixedTimezone, Timezone
     from pydantic import NonNegativeInt
@@ -662,9 +664,13 @@ class SerializedDAG:
         if not serialized_dag_id:
             return
 
-        # Query deadline alerts by serialized_dag_id
+        # Query Dag-level deadline alerts (task_id IS NULL) by serialized_dag_id. Task-level
+        # templates (task_id set) are materialized per task instance, never as DagRun deadlines.
         deadline_alert_records = session.scalars(
-            select(DeadlineAlertModel).where(DeadlineAlertModel.serialized_dag_id == serialized_dag_id)
+            select(DeadlineAlertModel).where(
+                DeadlineAlertModel.serialized_dag_id == serialized_dag_id,
+                DeadlineAlertModel.task_id.is_(None),
+            )
         ).all()
 
         for deadline_alert in deadline_alert_records:
@@ -1383,3 +1389,116 @@ def _create_orm_dagrun(
     # state is None at the moment of creation
     run.verify_integrity(session=session, dag_version_id=dag_version.id)
     return run
+
+
+def _process_taskinstance_deadline_alerts(
+    tis: Iterable[TaskInstance],
+    *,
+    bucket: tuple[type[SerializedReferenceModels.SerializedBaseDeadlineReference], ...],
+    session: Session,
+) -> None:
+    """
+    Materialize task-level Deadline records for the given task instances.
+
+    For each task instance, find the DeadlineAlert templates registered against its
+    serialized Dag and task_id, and create a Deadline row for every alert whose
+    reference falls into ``bucket`` (the references whose anchor column is populated
+    at this lifecycle moment). Alerts for references outside ``bucket`` are skipped
+    so a deadline is never evaluated against a column that is still NULL.
+
+    :param tis: Task instances that just transitioned (already persisted in the DB).
+    :param bucket: The ``SerializedReferenceModels.TYPES`` tuple to materialize now.
+    :param session: Database session.
+    """
+    from airflow.models.serialized_dag import SerializedDagModel
+
+    tis = [ti for ti in tis if ti.dag_version_id is not None]
+    if not tis:
+        return
+
+    # Batch the template discovery so a queuing loop over many task instances doesn't pay
+    # two round trips per task when no task-level deadlines are configured. One query maps
+    # dag_version_id -> serialized_dag_id, one loads every task-level alert for those Dags.
+    dag_version_ids = {ti.dag_version_id for ti in tis}
+    serialized_dag_id_by_version: dict[UUID | None, UUID] = {
+        row[0]: row[1]
+        for row in session.execute(
+            select(SerializedDagModel.dag_version_id, SerializedDagModel.id).where(
+                SerializedDagModel.dag_version_id.in_(dag_version_ids)
+            )
+        )
+    }
+    if not serialized_dag_id_by_version:
+        return
+
+    alerts_by_dag_and_task: dict[tuple[UUID | None, str | None], list[DeadlineAlertModel]] = defaultdict(list)
+    for alert in session.scalars(
+        select(DeadlineAlertModel).where(
+            DeadlineAlertModel.serialized_dag_id.in_(serialized_dag_id_by_version.values()),
+            DeadlineAlertModel.task_id.is_not(None),
+        )
+    ):
+        alerts_by_dag_and_task[(alert.serialized_dag_id, alert.task_id)].append(alert)
+    if not alerts_by_dag_and_task:
+        return
+
+    for ti in tis:
+        serialized_dag_id = serialized_dag_id_by_version.get(ti.dag_version_id)
+        deadline_alerts = alerts_by_dag_and_task.get((serialized_dag_id, ti.task_id), [])
+
+        for deadline_alert in deadline_alerts:
+            deserialized = decode_deadline_alert(
+                {
+                    Encoding.TYPE: DAT.DEADLINE_ALERT,
+                    Encoding.VAR: {
+                        DeadlineAlertFields.REFERENCE: deadline_alert.reference,
+                        DeadlineAlertFields.INTERVAL: deadline_alert.interval,
+                        DeadlineAlertFields.CALLBACK: deadline_alert.callback_def,
+                    },
+                }
+            )
+
+            if not isinstance(deserialized.reference, bucket):
+                continue
+
+            # Skip if a Deadline already exists for this (task_instance_id, deadline_alert_id)
+            # pair: materialize once per attempt, anchored at the attempt's first relevant
+            # transition, and never re-anchor in place. This mirrors the DagRun design, where a
+            # deadline is fixed when the run is created and a re-run is a new DagRun (here, a
+            # retry rotates ti.id and gets a fresh deadline). A same-id re-entry —
+            # UP_FOR_RESCHEDULE or a deferred resume — keeps its original anchor, exactly as a
+            # re-evaluated DagRun keeps its own; re-anchoring would let a frequently
+            # rescheduling task slide its need-by time forward and never fire.
+            if session.scalar(
+                select(Deadline.id).where(
+                    Deadline.task_instance_id == ti.id,
+                    Deadline.deadline_alert_id == deadline_alert.id,
+                )
+            ):
+                continue
+
+            interval = deserialized.interval
+            if isinstance(interval, VariableInterval):
+                interval = interval.resolve()
+
+            deadline_time = deserialized.reference.evaluate_with(
+                session=session,
+                interval=interval,
+                dag_id=ti.dag_id,
+                run_id=ti.run_id,
+                task_id=ti.task_id,
+                map_index=ti.map_index,
+            )
+
+            if deadline_time is not None:
+                session.add(
+                    Deadline(
+                        deadline_time=deadline_time,
+                        callback=deserialized.callback,
+                        task_instance_id=ti.id,
+                        deadline_alert_id=deadline_alert.id,
+                        dag_id=ti.dag_id,
+                        bundle_name=ti.dag_model.bundle_name,
+                    )
+                )
+                stats.incr("deadline_alerts.deadline_created", tags={"dag_id": ti.dag_id})

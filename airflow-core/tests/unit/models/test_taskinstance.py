@@ -3917,6 +3917,150 @@ def test_clear_task_instances_recalculates_dagrun_queued_deadlines(dag_maker, se
     assert recalculated_count == 2
 
 
+def test_set_state_success_prunes_task_instance_deadline(dag_maker, session):
+    """A TaskInstance reaching SUCCESS prunes its own (un-breached) deadline."""
+    with dag_maker(dag_id="test_ti_success_prunes_deadline"):
+        EmptyOperator(task_id="task_1")
+
+    dag_run = dag_maker.create_dagrun()
+    ti = dag_run.get_task_instance("task_1", session=session)
+
+    deadline = Deadline(
+        task_instance_id=ti.id,
+        deadline_alert_id=None,
+        deadline_time=timezone.utcnow() + datetime.timedelta(hours=1),
+        callback=AsyncCallback(empty_callback_for_deadline),
+    )
+    session.add(deadline)
+    session.flush()
+
+    assert session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
+
+    ti.set_state(TaskInstanceState.SUCCESS, session=session)
+
+    assert session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all() == []
+
+
+def test_prepare_db_for_next_try_deletes_task_instance_deadline(dag_maker, session):
+    """Preparing a TI for retry rotates its primary key, so its attempt-scoped deadline must go.
+
+    The deadline.task_instance_id FK points at the old id; leaving the row behind would orphan
+    it (and let a failed attempt's deadline still fire). The row and its callback are deleted
+    before the id is rotated.
+    """
+    from airflow.models.callback import Callback
+
+    with dag_maker(dag_id="test_ti_retry_deletes_deadline"):
+        EmptyOperator(task_id="task_1")
+
+    dag_run = dag_maker.create_dagrun()
+    ti = dag_run.get_task_instance("task_1", session=session)
+    old_id = ti.id
+
+    deadline = Deadline(
+        task_instance_id=ti.id,
+        deadline_alert_id=None,
+        deadline_time=timezone.utcnow() + datetime.timedelta(hours=1),
+        callback=AsyncCallback(empty_callback_for_deadline),
+    )
+    session.add(deadline)
+    session.flush()
+    callback_id = deadline.callback_id
+
+    ti.prepare_db_for_next_try(session)
+    session.flush()
+
+    assert ti.id != old_id
+    assert session.scalars(select(Deadline).where(Deadline.task_instance_id == old_id)).all() == []
+    assert session.get(Callback, callback_id) is None
+
+
+def test_prepare_db_for_next_try_preserves_missed_deadline(dag_maker, session):
+    """A deadline already marked missed (callback queued) survives retry cleanup, detached from the TI.
+
+    Deleting it would cascade-delete the callback and cancel an alert that has already fired.
+    """
+    from airflow.models.callback import Callback
+
+    with dag_maker(dag_id="test_ti_retry_keeps_missed_deadline"):
+        EmptyOperator(task_id="task_1")
+
+    dag_run = dag_maker.create_dagrun()
+    ti = dag_run.get_task_instance("task_1", session=session)
+    old_id = ti.id
+
+    deadline = Deadline(
+        task_instance_id=ti.id,
+        deadline_alert_id=None,
+        deadline_time=timezone.utcnow() - datetime.timedelta(hours=1),
+        callback=AsyncCallback(empty_callback_for_deadline),
+    )
+    deadline.missed = True
+    session.add(deadline)
+    session.flush()
+    deadline_id = deadline.id
+    callback_id = deadline.callback_id
+
+    ti.prepare_db_for_next_try(session)
+    session.flush()
+
+    assert ti.id != old_id
+    # The missed deadline and its (already-queued) callback are preserved, just detached.
+    surviving = session.get(Deadline, deadline_id)
+    assert surviving is not None
+    assert surviving.task_instance_id is None
+    assert session.get(Callback, callback_id) is not None
+
+
+def test_prepare_db_for_next_try_fires_breached_unmissed_deadline(dag_maker, session):
+    """A deadline that breached this attempt but wasn't scanned yet must fire, not be dropped, on retry.
+
+    The scheduler only flips ``missed`` during its periodic scan; if a task fails between
+    ``deadline_time`` and that scan, retry cleanup must still trigger the alert (mirroring how
+    SUCCESS pruning keeps breached deadlines), not delete it.
+    """
+    from airflow.models.callback import Callback
+
+    with dag_maker(dag_id="test_ti_retry_fires_breached_deadline"):
+        EmptyOperator(task_id="task_1")
+
+    dag_run = dag_maker.create_dagrun()
+    ti = dag_run.get_task_instance("task_1", session=session)
+    old_id = ti.id
+
+    # Unmissed but already past its deadline_time (scheduler hasn't scanned it yet).
+    deadline = Deadline(
+        task_instance_id=ti.id,
+        deadline_alert_id=None,
+        deadline_time=timezone.utcnow() - datetime.timedelta(hours=1),
+        callback=AsyncCallback(empty_callback_for_deadline),
+    )
+    session.add(deadline)
+    session.flush()
+    deadline_id = deadline.id
+    callback_id = deadline.callback_id
+    assert deadline.missed is False
+
+    # handle_miss (callback enqueue) is exercised on its own elsewhere; mock it here to set
+    # missed (as the real one does) and assert the breached deadline is fired, not dropped.
+    def _fake_handle_miss(self, session):
+        self.missed = True
+
+    with mock.patch.object(
+        Deadline, "handle_miss", autospec=True, side_effect=_fake_handle_miss
+    ) as mock_handle_miss:
+        ti.prepare_db_for_next_try(session)
+        session.flush()
+
+    mock_handle_miss.assert_called_once()
+    assert ti.id != old_id
+    surviving = session.get(Deadline, deadline_id)
+    assert surviving is not None
+    assert surviving.missed is True
+    assert surviving.task_instance_id is None
+    assert session.get(Callback, callback_id) is not None
+
+
 def test_get_dagrun_loaded_but_none_returns_dagrun(dag_maker, session):
     """
     Test that `get_dagrun()` fetches `DagRun` from DB when the `dag_run`

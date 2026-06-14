@@ -1301,6 +1301,42 @@ class TestSerializedBaseOperator:
         assert isinstance(result, datetime)
         assert result.timestamp() == timestamp
 
+    def test_operator_deadline_round_trip(self):
+        """An operator with a task-level deadline round-trips with .deadline populated."""
+        from airflow.sdk import DAG, BaseOperator
+        from airflow.serialization.serialized_objects import DagSerialization
+
+        original_alert = DeadlineAlert(
+            reference=DeadlineReference.TASKINSTANCE_STARTED_AT,
+            interval=timedelta(seconds=5),
+            callback=AsyncCallback(empty_callback_for_deadline, kwargs=TEST_CALLBACK_KWARGS),
+        )
+        with DAG(dag_id="test_op_deadline", start_date=DEFAULT_DATE) as dag:
+            BaseOperator(task_id="op_with_deadline", deadline=original_alert)
+
+        serialized = DagSerialization.serialize_dag(dag)
+        deserialized = DagSerialization.deserialize_dag(serialized)
+
+        task = deserialized.task_dict["op_with_deadline"]
+        assert isinstance(task.deadline, list)
+        assert len(task.deadline) == 1
+        assert equal_serialized_deadline_alert(task.deadline[0], original_alert)
+
+    def test_operator_without_deadline_round_trip(self):
+        """An operator without a deadline round-trips to .deadline is None."""
+        from airflow.sdk import DAG, BaseOperator
+        from airflow.serialization.serialized_objects import DagSerialization
+
+        with DAG(dag_id="test_op_no_deadline", start_date=DEFAULT_DATE) as dag:
+            BaseOperator(task_id="op_no_deadline")
+
+        serialized = DagSerialization.serialize_dag(dag)
+        assert serialized["tasks"][0]["__var"].get("deadline") in (None, [])
+
+        deserialized = DagSerialization.deserialize_dag(serialized)
+        task = deserialized.task_dict["op_no_deadline"]
+        assert task.deadline is None
+
 
 class TestRetryPolicySerialization:
     """Test that retry_policy is serialized as a boolean flag (has_retry_policy)."""

@@ -88,6 +88,18 @@ class DagRunQueuedAtDeadline(BaseDeadlineReference):
     """A deadline that returns when a DagRun was queued."""
 
 
+class TaskInstanceQueuedAtDeadline(BaseDeadlineReference):
+    """A deadline that returns when a TaskInstance was queued."""
+
+
+class TaskInstanceScheduledAtDeadline(BaseDeadlineReference):
+    """A deadline that returns when a TaskInstance was scheduled."""
+
+
+class TaskInstanceStartedAtDeadline(BaseDeadlineReference):
+    """A deadline that returns when a TaskInstance started."""
+
+
 @dataclass
 class FixedDatetimeDeadline(BaseDeadlineReference):
     """A deadline that always returns a fixed datetime."""
@@ -240,8 +252,25 @@ class DeadlineReference:
         # All DagRun-related deadline types.
         DAGRUN: DeadlineReferenceTypes = DAGRUN_CREATED + DAGRUN_QUEUED
 
+        # Deadlines that should be created when the TaskInstance is scheduled.
+        TASKINSTANCE_SCHEDULED: DeadlineReferenceTypes = (TaskInstanceScheduledAtDeadline,)
+
+        # Deadlines that should be created when the TaskInstance is queued.
+        TASKINSTANCE_QUEUED: DeadlineReferenceTypes = (TaskInstanceQueuedAtDeadline,)
+
+        # Deadlines that should be created when the TaskInstance starts.
+        TASKINSTANCE_STARTED: DeadlineReferenceTypes = (TaskInstanceStartedAtDeadline,)
+
+        # All TaskInstance-related deadline types.
+        TASKINSTANCE: DeadlineReferenceTypes = (
+            TASKINSTANCE_SCHEDULED + TASKINSTANCE_QUEUED + TASKINSTANCE_STARTED
+        )
+
     DAGRUN_LOGICAL_DATE: DeadlineReferenceType = DagRunLogicalDateDeadline()
     DAGRUN_QUEUED_AT: DeadlineReferenceType = DagRunQueuedAtDeadline()
+    TASKINSTANCE_QUEUED_AT: DeadlineReferenceType = TaskInstanceQueuedAtDeadline()
+    TASKINSTANCE_SCHEDULED_AT: DeadlineReferenceType = TaskInstanceScheduledAtDeadline()
+    TASKINSTANCE_STARTED_AT: DeadlineReferenceType = TaskInstanceStartedAtDeadline()
 
     @classmethod
     def AVERAGE_RUNTIME(cls, max_runs: int = 0, min_runs: int | None = None) -> DeadlineReferenceType:
@@ -254,16 +283,6 @@ class DeadlineReference:
     @classmethod
     def FIXED_DATETIME(cls, dt: datetime) -> DeadlineReferenceType:
         return FixedDatetimeDeadline(dt)
-
-    # TODO: Remove this once other deadline types exist.
-    #   This is a temporary reference type used only in tests to verify that
-    #   dag.has_dagrun_deadline() returns false if the dag has a non-dagrun deadline type.
-    #   It should be replaced with a real non-dagrun deadline type when one is available.
-    _TEMPORARY_TEST_REFERENCE = type(
-        "TemporaryTestDeadlineForTypeChecking",
-        (BaseDeadlineReference,),
-        {"serialize_reference": lambda self: {REFERENCE_TYPE_FIELD: "TemporaryTestDeadlineForTypeChecking"}},
-    )()
 
     @classmethod
     def register_custom_reference(
@@ -281,6 +300,20 @@ class DeadlineReference:
         # Default to DAGRUN_CREATED if no deadline_reference_type specified
         if deadline_reference_type is None:
             deadline_reference_type = cls.TYPES.DAGRUN_CREATED
+
+        # Custom task-level references aren't supported yet: the chosen TASKINSTANCE bucket
+        # isn't persisted across serialization (only __class_path is encoded), so at runtime a
+        # custom task reference can't be routed to the right materialization point. Built-in
+        # task references and custom DagRun references are unaffected.
+        if deadline_reference_type in (
+            cls.TYPES.TASKINSTANCE_SCHEDULED,
+            cls.TYPES.TASKINSTANCE_QUEUED,
+            cls.TYPES.TASKINSTANCE_STARTED,
+        ):
+            raise ValueError(
+                "Custom task-level deadline references are not yet supported; "
+                "register custom references against a DAGRUN bucket instead."
+            )
 
         # Validate the reference class inherits from BaseDeadlineReference
         # Accept both sdk and core base classes for backward compatibility for now
@@ -304,7 +337,7 @@ class DeadlineReference:
                 "must be a valid DeadlineReference.TYPES option."
             )
 
-        # Refresh the combined DAGRUN tuple
+        # Refresh the combined tuple
         cls.TYPES.DAGRUN = cls.TYPES.DAGRUN_CREATED + cls.TYPES.DAGRUN_QUEUED
 
         return reference_class

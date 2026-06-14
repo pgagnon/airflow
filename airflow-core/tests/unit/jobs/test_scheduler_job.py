@@ -126,6 +126,7 @@ from airflow.sdk import (
     task,
 )
 from airflow.sdk.definitions.callback import AsyncCallback, SyncCallback
+from airflow.sdk.definitions.deadline import DeadlineReference
 from airflow.sdk.definitions.timetables.assets import PartitionedAssetTimetable
 from airflow.serialization.definitions.dag import SerializedDAG
 from airflow.serialization.encoders import ensure_serialized_asset
@@ -8591,6 +8592,132 @@ class TestSchedulerJob:
         call_args = mock_listener_manager.hook.on_dag_run_failed.call_args
         assert call_args.kwargs["msg"] == "timed_out"
         assert call_args.kwargs["dag_run"] == dag_run
+
+    @staticmethod
+    def _persist_task_deadline_alert(dag_id, task_id, reference, interval, session):
+        """Persist a DeadlineAlert row for a task, mirroring SDK serialization."""
+        from datetime import timedelta as _timedelta
+
+        from airflow.sdk.definitions.deadline import DeadlineAlert as SDKDeadlineAlert
+        from airflow.serialization.encoders import encode_deadline_alert
+
+        encoded = encode_deadline_alert(
+            SDKDeadlineAlert(
+                reference=reference,
+                interval=_timedelta(seconds=interval),
+                callback=AsyncCallback("classpath.notify"),
+            )
+        )
+        serialized_dag = session.scalar(select(SerializedDagModel).where(SerializedDagModel.dag_id == dag_id))
+        alert = DeadlineAlert(
+            serialized_dag_id=serialized_dag.id,
+            task_id=task_id,
+            name=encoded["name"],
+            reference=encoded["reference"],
+            interval=encoded["interval"],
+            callback_def=encoded["callback"],
+        )
+        session.add(alert)
+        session.flush()
+        return alert
+
+    def test_executable_task_instances_to_queued_materializes_task_deadline(self, session, dag_maker):
+        """Moving a task to QUEUED materializes a Deadline row for its TASKINSTANCE_QUEUED_AT alert."""
+        dag_id = "test_ti_queued_deadline"
+        with dag_maker(dag_id=dag_id, session=session):
+            EmptyOperator(task_id="task1")
+        self._persist_task_deadline_alert(
+            dag_id, "task1", DeadlineReference.TASKINSTANCE_QUEUED_AT, 300, session
+        )
+
+        dr = dag_maker.create_dagrun(run_type=DagRunType.SCHEDULED)
+        ti = dr.get_task_instance("task1")
+        ti.state = State.SCHEDULED
+        session.merge(ti)
+        session.flush()
+
+        scheduler_job = Job()
+        self.job_runner = SchedulerJobRunner(job=scheduler_job, executors=[MockExecutor()])
+        queued_tis = self.job_runner._executable_task_instances_to_queued(max_tis=32, session=session)
+        session.flush()
+
+        assert len(queued_tis) == 1
+        queued_ti = session.scalars(select(TaskInstance).where(TaskInstance.id == queued_tis[0].id)).one()
+        deadlines = session.scalars(select(Deadline).where(Deadline.task_instance_id == queued_ti.id)).all()
+        assert len(deadlines) == 1
+        assert deadlines[0].deadline_time == queued_ti.queued_dttm + timedelta(seconds=300)
+
+    def test_scheduler_scan_picks_up_expired_task_deadline(self, session, dag_maker):
+        """The scheduler's deadline scan selects a past-due TI deadline and calls handle_miss.
+
+        The TI relationship must be eager-loaded (selectinload) so handle_miss does not
+        lazy-load a detached TaskInstance after the scan session expunges its objects.
+        """
+        dag_id = "test_ti_deadline_missed"
+        with dag_maker(dag_id=dag_id, session=session):
+            EmptyOperator(task_id="task1")
+        alert = self._persist_task_deadline_alert(
+            dag_id, "task1", DeadlineReference.TASKINSTANCE_STARTED_AT, 300, session
+        )
+
+        dr = dag_maker.create_dagrun(run_type=DagRunType.SCHEDULED)
+        ti = dr.get_task_instance("task1")
+        deadline = Deadline(
+            deadline_time=timezone.utcnow() - timedelta(minutes=5),
+            callback=AsyncCallback("classpath.notify"),
+            task_instance_id=ti.id,
+            dag_id=dag_id,
+            deadline_alert_id=alert.id,
+        )
+        session.add(deadline)
+        session.commit()
+        deadline_id = deadline.id
+
+        # Capture the TaskInstance the eager-load makes available to handle_miss without
+        # exercising the foundation callback-queueing path (covered by its own tests).
+        seen_task_ids = []
+
+        def _spy_handle_miss(self_deadline, _session):
+            seen_task_ids.append(self_deadline.task_instance.task_id)
+            self_deadline.missed = True
+
+        scheduler_job = Job()
+        self.job_runner = SchedulerJobRunner(job=scheduler_job, num_runs=1, executors=[MockExecutor()])
+        with mock.patch("airflow.models.Deadline.handle_miss", autospec=True, side_effect=_spy_handle_miss):
+            self.job_runner._execute()
+
+        assert seen_task_ids == ["task1"]
+        refreshed = session.scalars(select(Deadline).where(Deadline.id == deadline_id)).one()
+        assert refreshed.missed is True
+
+    def test_successful_task_prunes_materialized_deadline(self, session, dag_maker):
+        """A task finishing before its deadline has the materialized Deadline pruned on success."""
+        dag_id = "test_ti_deadline_pruned"
+        with dag_maker(dag_id=dag_id, session=session):
+            EmptyOperator(task_id="task1")
+        alert = self._persist_task_deadline_alert(
+            dag_id, "task1", DeadlineReference.TASKINSTANCE_STARTED_AT, 300, session
+        )
+
+        dr = dag_maker.create_dagrun(run_type=DagRunType.SCHEDULED)
+        ti = dr.get_task_instance("task1")
+        ti.start_date = timezone.utcnow() - timedelta(minutes=10)
+        deadline = Deadline(
+            deadline_time=timezone.utcnow() + timedelta(minutes=5),
+            callback=SyncCallback("classpath.notify"),
+            task_instance_id=ti.id,
+            dag_id=dag_id,
+            deadline_alert_id=alert.id,
+        )
+        session.add(deadline)
+        session.merge(ti)
+        session.commit()
+
+        ti.set_state(State.SUCCESS, session=session)
+        session.commit()
+
+        remaining = session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
+        assert remaining == []
 
     @mock.patch("airflow.models.Deadline.handle_miss")
     def test_process_expired_deadlines(self, mock_handle_miss, session, dag_maker):

@@ -74,6 +74,7 @@ class SerializedBaseOperator(DAGNode):
 
     allow_nested_operators: bool = True
     dag: SerializedDAG | None = None
+    deadline: list | None = None
     depends_on_past: bool = False
     do_xcom_push: bool = True
     doc: str | None = None
@@ -177,6 +178,7 @@ class SerializedBaseOperator(DAGNode):
                 "_needs_expansion",
                 "_task_display_name",
                 "allow_nested_operators",
+                "deadline",
                 "depends_on_past",
                 "do_xcom_push",
                 "doc",

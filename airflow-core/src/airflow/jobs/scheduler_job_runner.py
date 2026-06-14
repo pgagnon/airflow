@@ -111,6 +111,8 @@ from airflow.models.trigger import TRIGGER_FAIL_REPR, Trigger, TriggerFailureRea
 from airflow.observability.metrics import stats_utils
 from airflow.partition_mappers.base import is_rollup
 from airflow.serialization.definitions.assets import SerializedAssetUniqueKey
+from airflow.serialization.definitions.dag import _process_taskinstance_deadline_alerts
+from airflow.serialization.definitions.deadline import SerializedReferenceModels
 from airflow.serialization.definitions.notset import NOTSET
 from airflow.ti_deps.dependencies_states import ACTIVE_STATES, EXECUTION_STATES
 from airflow.timetables.base import Timetable, compute_rollup_fingerprint
@@ -1029,6 +1031,16 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
             for ti in executable_tis:
                 ti.emit_state_change_metric(TaskInstanceState.QUEUED)
 
+            # Materialize task-level Deadline rows for queued-anchor alerts. The in-memory
+            # queued_dttm is stale (synchronize_session=False) but evaluate_with reads it
+            # back from the DB, so the DB-side update above is sufficient. Scheduled-anchor
+            # alerts are materialized earlier, at the SCHEDULED transition in schedule_tis.
+            _process_taskinstance_deadline_alerts(
+                executable_tis,
+                bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_QUEUED,
+                session=session,
+            )
+
         for ti in executable_tis:
             make_transient(ti)
         return executable_tis
@@ -1779,7 +1791,11 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                         select(Deadline)
                         .where(Deadline.deadline_time < datetime.now(timezone.utc))
                         .where(~Deadline.missed)
-                        .options(selectinload(Deadline.callback), selectinload(Deadline.dagrun))
+                        .options(
+                            selectinload(Deadline.callback),
+                            selectinload(Deadline.dagrun),
+                            selectinload(Deadline.task_instance),
+                        )
                     )
                     for deadline in session.scalars(
                         with_row_locks(
