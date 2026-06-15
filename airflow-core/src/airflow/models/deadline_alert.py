@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 import uuid6
-from sqlalchemy import JSON, ForeignKey, String, Text, Uuid, select
+from sqlalchemy import JSON, ForeignKey, Index, String, Text, Uuid, select
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,6 +56,13 @@ class DeadlineAlert(Base):
     reference: Mapped[dict] = mapped_column(JSON, nullable=False)
     interval: Mapped[dict] = mapped_column(JSON, nullable=False)
     callback_def: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    __table_args__ = (
+        # Template discovery filters on serialized_dag_id then task_id: Dag-level alerts
+        # (task_id IS NULL) at run creation, task-level alerts (task_id IS NOT NULL) at every
+        # scheduled/queued/started transition. A composite index serves both access patterns.
+        Index("deadline_alert_serialized_dag_id_task_id_idx", serialized_dag_id, task_id, unique=False),
+    )
 
     def __repr__(self):
 

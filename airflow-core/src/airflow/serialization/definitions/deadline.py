@@ -193,10 +193,9 @@ class SerializedReferenceModels:
         required_kwargs = {"dag_id", "run_id", "task_id", "map_index"}
 
         def _evaluate_with(self, *, session: Session, **kwargs: Any) -> datetime | None:
-            from airflow.models.deadline import _fetch_from_db
             from airflow.models.taskinstance import TaskInstance
 
-            return _fetch_from_db(TaskInstance.queued_dttm, session=session, **kwargs)
+            return fetch_ti_anchor_from_db(TaskInstance.queued_dttm, session=session, **kwargs)
 
     class TaskInstanceScheduledAtDeadline(SerializedBaseDeadlineReference):
         """A deadline that returns when a TaskInstance was scheduled."""
@@ -204,10 +203,9 @@ class SerializedReferenceModels:
         required_kwargs = {"dag_id", "run_id", "task_id", "map_index"}
 
         def _evaluate_with(self, *, session: Session, **kwargs: Any) -> datetime | None:
-            from airflow.models.deadline import _fetch_from_db
             from airflow.models.taskinstance import TaskInstance
 
-            return _fetch_from_db(TaskInstance.scheduled_dttm, session=session, **kwargs)
+            return fetch_ti_anchor_from_db(TaskInstance.scheduled_dttm, session=session, **kwargs)
 
     class TaskInstanceStartedAtDeadline(SerializedBaseDeadlineReference):
         """A deadline that returns when a TaskInstance started."""
@@ -215,10 +213,9 @@ class SerializedReferenceModels:
         required_kwargs = {"dag_id", "run_id", "task_id", "map_index"}
 
         def _evaluate_with(self, *, session: Session, **kwargs: Any) -> datetime | None:
-            from airflow.models.deadline import _fetch_from_db
             from airflow.models.taskinstance import TaskInstance
 
-            return _fetch_from_db(TaskInstance.start_date, session=session, **kwargs)
+            return fetch_ti_anchor_from_db(TaskInstance.start_date, session=session, **kwargs)
 
     @dataclass
     class AverageRuntimeDeadline(SerializedBaseDeadlineReference):
@@ -419,6 +416,41 @@ def _fetch_from_db(column, *, session: Session, dag_id: str, run_id: str) -> dat
     result = session.execute(select(column).where(DagRun.dag_id == dag_id, DagRun.run_id == run_id)).scalar()
     if result is None:
         logger.warning("Could not find DagRun for dag_id=%s, run_id=%s", dag_id, run_id)
+    return result
+
+
+def fetch_ti_anchor_from_db(
+    column, *, session: Session, dag_id: str, run_id: str, task_id: str, map_index: int
+) -> datetime | None:
+    """
+    Fetch a datetime anchor column from the TaskInstance table.
+
+    Returns ``None`` (and logs a warning) when the task instance is missing or the anchor
+    column is still NULL, mirroring :func:`_fetch_from_db`. Callers materialize a deadline
+    only when a non-``None`` value is returned, so a not-yet-populated anchor is skipped
+    rather than raising and crashing the scheduler loop or the ti_run handler.
+
+    :meta private:
+    """
+    from airflow.models.taskinstance import TaskInstance
+
+    result = session.execute(
+        select(column).where(
+            TaskInstance.dag_id == dag_id,
+            TaskInstance.run_id == run_id,
+            TaskInstance.task_id == task_id,
+            TaskInstance.map_index == map_index,
+        )
+    ).scalar()
+    if result is None:
+        logger.warning(
+            "No anchor timestamp yet for TaskInstance dag_id=%s, run_id=%s, task_id=%s, map_index=%s; "
+            "skipping deadline materialization",
+            dag_id,
+            run_id,
+            task_id,
+            map_index,
+        )
     return result
 
 

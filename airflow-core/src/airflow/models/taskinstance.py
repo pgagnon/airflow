@@ -1058,6 +1058,11 @@ class TaskInstance(Base, LoggingMixin, BaseWorkload):
             if not deadline.missed and deadline.deadline_time <= now:
                 deadline.handle_miss(session=session)
             if deadline.missed:
+                # Detaching leaves a row with both dagrun_id and task_instance_id NULL. That is
+                # intentional: the alert already fired, so the row is kept only as a record, no
+                # longer anchored to the rotating id. The __init__ "exactly one anchor" invariant
+                # is creation-only and doesn't apply here, and db_cleanup still reclaims the row by
+                # age via the standalone deadline config (deadline_time / dag_id, both populated).
                 deadline.task_instance_id = None
             else:
                 session.delete(deadline)

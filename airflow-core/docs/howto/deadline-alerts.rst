@@ -20,8 +20,9 @@ Deadline Alerts
 ===============
 
 .. warning::
-  Deadline Alerts are new in Airflow 3.1 and should be considered experimental. The feature may be
-  subject to changes in future versions without warning based on user feedback.
+  Deadline Alerts are new in Airflow 3.1, and task-level Deadline Alerts are new in Airflow 3.3. The
+  feature should be considered experimental and may be subject to changes in future versions without
+  warning based on user feedback.
 
 |experimental|
 

@@ -719,43 +719,22 @@ class SerializedDAG:
             if not deadline_alert:
                 continue
 
-            deserialized_deadline_alert = decode_deadline_alert(
-                {
-                    Encoding.TYPE: DAT.DEADLINE_ALERT,
-                    Encoding.VAR: {
-                        DeadlineAlertFields.REFERENCE: deadline_alert.reference,
-                        DeadlineAlertFields.INTERVAL: deadline_alert.interval,
-                        DeadlineAlertFields.CALLBACK: deadline_alert.callback_def,
-                    },
-                }
-            )
-
-            interval = deserialized_deadline_alert.interval
-
-            if isinstance(interval, VariableInterval):
-                interval = interval.resolve()
+            deserialized_deadline_alert = decode_deadline_alert_template(deadline_alert)
 
             if isinstance(deserialized_deadline_alert.reference, SerializedReferenceModels.TYPES.DAGRUN):
-                deadline_time = deserialized_deadline_alert.reference.evaluate_with(
+                create_deadline_row(
+                    deserialized_deadline_alert,
+                    deadline_alert_id=deadline_alert.id,
+                    eval_kwargs={
+                        # TODO : Pretty sure we can drop these last two; verify after testing is complete
+                        "dag_id": self.dag_id,
+                        "run_id": orm_dagrun.run_id,
+                    },
+                    dag_id=orm_dagrun.dag_id,
+                    bundle_name=orm_dagrun.dag_model.bundle_name,
                     session=session,
-                    interval=interval,
-                    # TODO : Pretty sure we can drop these last two; verify after testing is complete
-                    dag_id=self.dag_id,
-                    run_id=orm_dagrun.run_id,
+                    dagrun_id=orm_dagrun.id,
                 )
-
-                if deadline_time is not None:
-                    session.add(
-                        Deadline(
-                            deadline_time=deadline_time,
-                            callback=deserialized_deadline_alert.callback,
-                            dagrun_id=orm_dagrun.id,
-                            deadline_alert_id=deadline_alert.id,
-                            dag_id=orm_dagrun.dag_id,
-                            bundle_name=orm_dagrun.dag_model.bundle_name,
-                        )
-                    )
-                    stats.incr("deadline_alerts.deadline_created", tags={"dag_id": self.dag_id})
 
     @provide_session
     def set_task_instance_state(
@@ -1433,6 +1412,62 @@ def _create_orm_dagrun(
     return run
 
 
+def decode_deadline_alert_template(deadline_alert: DeadlineAlertModel):
+    """Decode a persisted ``DeadlineAlert`` row back into its ``SerializedDeadlineAlert``."""
+    return decode_deadline_alert(
+        {
+            Encoding.TYPE: DAT.DEADLINE_ALERT,
+            Encoding.VAR: {
+                DeadlineAlertFields.REFERENCE: deadline_alert.reference,
+                DeadlineAlertFields.INTERVAL: deadline_alert.interval,
+                DeadlineAlertFields.CALLBACK: deadline_alert.callback_def,
+            },
+        }
+    )
+
+
+def create_deadline_row(
+    deserialized,
+    *,
+    deadline_alert_id: UUID,
+    eval_kwargs: dict[str, Any],
+    dag_id: str,
+    bundle_name: str | None,
+    session: Session,
+    dagrun_id: int | None = None,
+    task_instance_id: UUID | None = None,
+) -> bool:
+    """
+    Evaluate a decoded deadline reference and add a ``Deadline`` row anchored to its event.
+
+    Exactly one of ``dagrun_id`` / ``task_instance_id`` must be set. The reference is
+    evaluated with ``eval_kwargs``; if its anchor column is still NULL the reference returns
+    ``None`` and no row is created (the deadline is simply skipped, never raised), so a
+    not-yet-populated anchor can't crash the caller. Returns ``True`` when a row was created.
+    """
+    interval = deserialized.interval
+    if isinstance(interval, VariableInterval):
+        interval = interval.resolve()
+
+    deadline_time = deserialized.reference.evaluate_with(session=session, interval=interval, **eval_kwargs)
+    if deadline_time is None:
+        return False
+
+    session.add(
+        Deadline(
+            deadline_time=deadline_time,
+            callback=deserialized.callback,
+            dagrun_id=dagrun_id,
+            task_instance_id=task_instance_id,
+            deadline_alert_id=deadline_alert_id,
+            dag_id=dag_id,
+            bundle_name=bundle_name,
+        )
+    )
+    stats.incr("deadline_alerts.deadline_created", tags={"dag_id": dag_id})
+    return True
+
+
 def _process_taskinstance_deadline_alerts(
     tis: Iterable[TaskInstance],
     *,
@@ -1489,16 +1524,7 @@ def _process_taskinstance_deadline_alerts(
         deadline_alerts = alerts_by_dag_and_task.get((serialized_dag_id, ti.task_id), [])
 
         for deadline_alert in deadline_alerts:
-            deserialized = decode_deadline_alert(
-                {
-                    Encoding.TYPE: DAT.DEADLINE_ALERT,
-                    Encoding.VAR: {
-                        DeadlineAlertFields.REFERENCE: deadline_alert.reference,
-                        DeadlineAlertFields.INTERVAL: deadline_alert.interval,
-                        DeadlineAlertFields.CALLBACK: deadline_alert.callback_def,
-                    },
-                }
-            )
+            deserialized = decode_deadline_alert_template(deadline_alert)
 
             if not isinstance(deserialized.reference, bucket):
                 continue
@@ -1519,28 +1545,17 @@ def _process_taskinstance_deadline_alerts(
             ):
                 continue
 
-            interval = deserialized.interval
-            if isinstance(interval, VariableInterval):
-                interval = interval.resolve()
-
-            deadline_time = deserialized.reference.evaluate_with(
-                session=session,
-                interval=interval,
+            create_deadline_row(
+                deserialized,
+                deadline_alert_id=deadline_alert.id,
+                eval_kwargs={
+                    "dag_id": ti.dag_id,
+                    "run_id": ti.run_id,
+                    "task_id": ti.task_id,
+                    "map_index": ti.map_index,
+                },
                 dag_id=ti.dag_id,
-                run_id=ti.run_id,
-                task_id=ti.task_id,
-                map_index=ti.map_index,
+                bundle_name=ti.dag_model.bundle_name,
+                session=session,
+                task_instance_id=ti.id,
             )
-
-            if deadline_time is not None:
-                session.add(
-                    Deadline(
-                        deadline_time=deadline_time,
-                        callback=deserialized.callback,
-                        task_instance_id=ti.id,
-                        deadline_alert_id=deadline_alert.id,
-                        dag_id=ti.dag_id,
-                        bundle_name=ti.dag_model.bundle_name,
-                    )
-                )
-                stats.incr("deadline_alerts.deadline_created", tags={"dag_id": ti.dag_id})

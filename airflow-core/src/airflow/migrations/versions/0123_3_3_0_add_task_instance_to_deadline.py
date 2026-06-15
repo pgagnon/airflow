@@ -53,11 +53,17 @@ def upgrade():
 
     with op.batch_alter_table("deadline_alert", schema=None) as batch_op:
         batch_op.add_column(sa.Column("task_id", StringID(), nullable=True))
+        batch_op.create_index(
+            "deadline_alert_serialized_dag_id_task_id_idx",
+            ["serialized_dag_id", "task_id"],
+            unique=False,
+        )
 
 
 def downgrade():
     """Unapply Add task instance anchor to deadline and task_id to deadline_alert."""
     with op.batch_alter_table("deadline_alert", schema=None) as batch_op:
+        batch_op.drop_index("deadline_alert_serialized_dag_id_task_id_idx")
         batch_op.drop_column("task_id")
 
     with op.batch_alter_table("deadline", schema=None) as batch_op:

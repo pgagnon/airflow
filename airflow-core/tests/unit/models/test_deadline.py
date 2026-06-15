@@ -623,19 +623,38 @@ class TestCalculatedDeadlineDatabaseCalls:
         ],
     )
     def test_taskinstance_deadline_database_integration(self, reference, expected_column_name, session):
-        """TaskInstance deadlines call the generic _fetch_from_db with the right column."""
+        """TaskInstance deadlines call fetch_ti_anchor_from_db with the right column."""
         from airflow.models.taskinstance import TaskInstance
 
         conditions = {"dag_id": DAG_ID, "run_id": "dagrun_1", "task_id": "TASK_ID", "map_index": -1}
         interval = timedelta(hours=1)
         expected_column = getattr(TaskInstance, expected_column_name)
 
-        with mock.patch("airflow.models.deadline._fetch_from_db") as mock_fetch:
+        with mock.patch("airflow.serialization.definitions.deadline.fetch_ti_anchor_from_db") as mock_fetch:
             mock_fetch.return_value = DEFAULT_DATE
             result = reference.evaluate_with(session=session, interval=interval, **conditions)
 
         mock_fetch.assert_called_once_with(expected_column, session=session, **conditions)
         assert result == DEFAULT_DATE + interval
+
+    @pytest.mark.parametrize(
+        "reference",
+        [
+            pytest.param(SerializedReferenceModels.TaskInstanceQueuedAtDeadline(), id="ti_queued_at"),
+            pytest.param(SerializedReferenceModels.TaskInstanceScheduledAtDeadline(), id="ti_scheduled_at"),
+            pytest.param(SerializedReferenceModels.TaskInstanceStartedAtDeadline(), id="ti_started_at"),
+        ],
+    )
+    def test_taskinstance_deadline_returns_none_when_anchor_missing(self, reference, session):
+        """A NULL/missing anchor column yields None (skip) rather than raising, so a not-yet-populated
+        anchor can never crash the scheduler loop or the ti_run handler at materialization time."""
+        conditions = {"dag_id": DAG_ID, "run_id": "dagrun_1", "task_id": "TASK_ID", "map_index": -1}
+
+        with mock.patch("airflow.serialization.definitions.deadline.fetch_ti_anchor_from_db") as mock_fetch:
+            mock_fetch.return_value = None
+            result = reference.evaluate_with(session=session, interval=timedelta(hours=1), **conditions)
+
+        assert result is None
 
     @pytest.mark.parametrize(
         "reference",

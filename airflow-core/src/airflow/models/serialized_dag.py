@@ -417,8 +417,11 @@ class SerializedDagModel(Base):
             if not isinstance(task, dict):
                 continue
             task_data = task.get(Encoding.VAR, task)
-            if task_data.get("deadline"):
-                task_carriers.append((task_data, task_data["task_id"]))
+            # A deadline-bearing task must have a task_id to be materialized against; skip any
+            # malformed entry rather than KeyError, and keep the sort key well-ordered.
+            task_id = task_data.get("task_id")
+            if task_data.get("deadline") and task_id is not None:
+                task_carriers.append((task_data, task_id))
         for task_data, task_id in sorted(task_carriers, key=lambda item: item[1]):
             yield task_data, task_id
 
@@ -501,23 +504,32 @@ class SerializedDagModel(Base):
         # None, breaking the _generate_deadline_uuids fallback (it expects encoded dicts).
         pending_rewrites: list[tuple[dict, list[str]]] = []
 
+        # Run the cheap per-carrier checks and collect every existing UUID up front so all
+        # alert rows load in a single IN-query, instead of one round trip per carrier.
         for carrier, task_id in new_carriers:
             existing_deadline_uuids = existing_uuids_by_task[task_id]
-            new_deadline_data = carrier["deadline"]
-
             # defensive check for old 3.1.x format
             if existing_deadline_uuids and not isinstance(existing_deadline_uuids[0], str):
                 # this triggers _generate_deadline_uuids to create fresh UUIDs
                 return None
-
-            if len(existing_deadline_uuids) != len(new_deadline_data):
+            if len(existing_deadline_uuids) != len(carrier["deadline"]):
                 return None
 
-            existing_deadline_uuids_as_uuid = [UUID(uid) for uid in existing_deadline_uuids]
-            existing_alerts = session.scalars(
-                select(DeadlineAlertModel).where(DeadlineAlertModel.id.in_(existing_deadline_uuids_as_uuid))
-            ).all()
+        all_existing_uuids = [UUID(uid) for uuids in existing_uuids_by_task.values() for uid in uuids]
+        alert_by_id = {
+            alert.id: alert
+            for alert in session.scalars(
+                select(DeadlineAlertModel).where(DeadlineAlertModel.id.in_(all_existing_uuids))
+            )
+        }
 
+        for carrier, task_id in new_carriers:
+            existing_deadline_uuids = existing_uuids_by_task[task_id]
+            new_deadline_data = carrier["deadline"]
+
+            existing_alerts = [
+                alert_by_id[UUID(uid)] for uid in existing_deadline_uuids if UUID(uid) in alert_by_id
+            ]
             if len(existing_alerts) != len(existing_deadline_uuids):
                 return None
 

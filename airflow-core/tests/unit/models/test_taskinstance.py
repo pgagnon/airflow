@@ -109,6 +109,7 @@ from airflow.ti_deps.deps.trigger_rule_dep import TriggerRuleDep, _UpstreamTISta
 from airflow.timetables.simple import PartitionAtRuntime
 from airflow.utils.session import create_session, provide_session
 from airflow.utils.span_status import SpanStatus
+from airflow.utils.sqlalchemy import with_row_locks
 from airflow.utils.state import DagRunState, State, TaskInstanceState
 from airflow.utils.types import DagRunTriggeredByType, DagRunType
 
@@ -4059,6 +4060,90 @@ def test_prepare_db_for_next_try_fires_breached_unmissed_deadline(dag_maker, ses
     assert surviving.missed is True
     assert surviving.task_instance_id is None
     assert session.get(Callback, callback_id) is not None
+
+
+def test_prepare_db_for_next_try_handles_mixed_missed_and_stale_deadlines(dag_maker, session):
+    """A TI carrying both an already-missed deadline and a stale-unmissed one is cleaned correctly.
+
+    This is the rotate-vs-scan race outcome: the scheduler's scan flipped one deadline to
+    ``missed`` (and queued its callback) before retry cleanup ran; that row must be detached and
+    kept, its callback left intact, and ``handle_miss`` must NOT fire again for it. The other
+    deadline never breached, so it is deleted (the next attempt re-materializes its own).
+    """
+    from airflow.models.callback import Callback
+
+    with dag_maker(dag_id="test_ti_retry_mixed_deadlines"):
+        EmptyOperator(task_id="task_1")
+
+    dag_run = dag_maker.create_dagrun()
+    ti = dag_run.get_task_instance("task_1", session=session)
+    old_id = ti.id
+
+    # Already scanned and fired by the scheduler.
+    missed = Deadline(
+        task_instance_id=ti.id,
+        deadline_alert_id=None,
+        deadline_time=timezone.utcnow() - datetime.timedelta(hours=2),
+        callback=AsyncCallback(empty_callback_for_deadline),
+    )
+    missed.missed = True
+    # Not breached: in the future, so retry cleanup should delete it.
+    stale = Deadline(
+        task_instance_id=ti.id,
+        deadline_alert_id=None,
+        deadline_time=timezone.utcnow() + datetime.timedelta(hours=2),
+        callback=AsyncCallback(empty_callback_for_deadline),
+    )
+    session.add_all([missed, stale])
+    session.flush()
+    missed_id, missed_callback_id = missed.id, missed.callback_id
+    stale_id, stale_callback_id = stale.id, stale.callback_id
+
+    with mock.patch.object(Deadline, "handle_miss", autospec=True) as mock_handle_miss:
+        ti.prepare_db_for_next_try(session)
+        session.flush()
+
+    # The already-missed deadline is not re-fired (it was past, but missed is already True).
+    mock_handle_miss.assert_not_called()
+    assert ti.id != old_id
+
+    surviving = session.get(Deadline, missed_id)
+    assert surviving is not None
+    assert surviving.task_instance_id is None
+    assert session.get(Callback, missed_callback_id) is not None
+
+    # The un-breached deadline and its callback are gone.
+    assert session.get(Deadline, stale_id) is None
+    assert session.get(Callback, stale_callback_id) is None
+
+
+def test_prepare_db_for_next_try_locks_deadline_rows(dag_maker, session):
+    """Retry cleanup must select the TI's deadlines FOR UPDATE so it can't race the scheduler scan.
+
+    The lock is what makes the ``missed`` flag authoritative across the rotate-vs-scan boundary;
+    assert ``with_row_locks`` is applied to the deadline query rather than a plain SELECT.
+    """
+    with dag_maker(dag_id="test_ti_retry_locks_deadlines"):
+        EmptyOperator(task_id="task_1")
+
+    dag_run = dag_maker.create_dagrun()
+    ti = dag_run.get_task_instance("task_1", session=session)
+
+    deadline = Deadline(
+        task_instance_id=ti.id,
+        deadline_alert_id=None,
+        deadline_time=timezone.utcnow() + datetime.timedelta(hours=1),
+        callback=AsyncCallback(empty_callback_for_deadline),
+    )
+    session.add(deadline)
+    session.flush()
+
+    with mock.patch("airflow.models.taskinstance.with_row_locks", wraps=with_row_locks) as mock_locks:
+        ti.prepare_db_for_next_try(session)
+        session.flush()
+
+    locked_models = {call.kwargs.get("of") for call in mock_locks.call_args_list}
+    assert Deadline in locked_models
 
 
 def test_get_dagrun_loaded_but_none_returns_dagrun(dag_maker, session):
