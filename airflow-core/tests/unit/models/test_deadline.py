@@ -656,6 +656,49 @@ class TestCalculatedDeadlineDatabaseCalls:
 
         assert result is None
 
+    def test_taskinstance_logical_date_reads_dagrun(self, session):
+        """The task logical-date anchor reads DagRun.logical_date via the non-raising fetch,
+        ignoring the task_id/map_index the materializer also passes."""
+        from airflow.models import DagRun
+
+        conditions = {"dag_id": DAG_ID, "run_id": "dagrun_1", "task_id": "TASK_ID", "map_index": -1}
+        interval = timedelta(hours=1)
+        reference = SerializedReferenceModels.TaskInstanceLogicalDateDeadline()
+        assert reference.required_kwargs == {"dag_id", "run_id"}
+
+        with mock.patch("airflow.serialization.definitions.deadline._fetch_from_db") as mock_fetch:
+            mock_fetch.return_value = DEFAULT_DATE
+            result = reference.evaluate_with(session=session, interval=interval, **conditions)
+
+        # Only dag_id/run_id are forwarded; task_id and map_index are filtered out.
+        mock_fetch.assert_called_once_with(
+            DagRun.logical_date, session=session, dag_id=DAG_ID, run_id="dagrun_1"
+        )
+        assert result == DEFAULT_DATE + interval
+
+    def test_taskinstance_fixed_datetime_needs_no_db(self, session):
+        """The task fixed-datetime anchor returns its embedded datetime without any DB read."""
+        interval = timedelta(hours=1)
+        reference = SerializedReferenceModels.TaskInstanceFixedDatetimeDeadline(_datetime=DEFAULT_DATE)
+        assert reference.required_kwargs == set()
+
+        with mock.patch("airflow.serialization.definitions.deadline._fetch_from_db") as mock_dr_fetch:
+            with mock.patch(
+                "airflow.serialization.definitions.deadline.fetch_ti_anchor_from_db"
+            ) as mock_ti_fetch:
+                result = reference.evaluate_with(
+                    session=session,
+                    interval=interval,
+                    dag_id=DAG_ID,
+                    run_id="dagrun_1",
+                    task_id="TASK_ID",
+                    map_index=-1,
+                )
+
+        mock_dr_fetch.assert_not_called()
+        mock_ti_fetch.assert_not_called()
+        assert result == DEFAULT_DATE + interval
+
     @pytest.mark.parametrize(
         "reference",
         [

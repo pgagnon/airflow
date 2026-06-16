@@ -189,12 +189,37 @@ class TestTaskInstanceReferences:
                 "TASKINSTANCE_STARTED",
                 id="started_at",
             ),
+            pytest.param(
+                DeadlineReference.TASKINSTANCE_LOGICAL_DATE,
+                "TaskInstanceLogicalDateDeadline",
+                "TASKINSTANCE_SCHEDULED",
+                id="logical_date",
+            ),
         ],
     )
     def test_taskinstance_reference(self, reference, expected_reference_type, expected_bucket):
         assert reference.serialize_reference() == {"reference_type": expected_reference_type}
         assert type(reference) in DeadlineReference.TYPES.TASKINSTANCE
         assert type(reference) in getattr(DeadlineReference.TYPES, expected_bucket)
+        assert type(reference) not in DeadlineReference.TYPES.DAGRUN
+
+        deserialized = type(reference).deserialize_reference(reference.serialize_reference())
+        assert deserialized == reference
+
+    def test_taskinstance_fixed_datetime_reference(self):
+        """The task-level fixed-datetime anchor carries its datetime payload and round-trips."""
+        from datetime import timezone as _tz
+
+        fixed_dt = datetime(2026, 1, 1, tzinfo=_tz.utc)
+        reference = DeadlineReference.TASKINSTANCE_FIXED_DATETIME(fixed_dt)
+
+        assert reference.serialize_reference() == {
+            "reference_type": "TaskInstanceFixedDatetimeDeadline",
+            "datetime": fixed_dt.timestamp(),
+        }
+        # It materializes at scheduling time, not as a DagRun deadline.
+        assert type(reference) in DeadlineReference.TYPES.TASKINSTANCE
+        assert type(reference) in DeadlineReference.TYPES.TASKINSTANCE_SCHEDULED
         assert type(reference) not in DeadlineReference.TYPES.DAGRUN
 
         deserialized = type(reference).deserialize_reference(reference.serialize_reference())

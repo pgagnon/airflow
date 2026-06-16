@@ -147,6 +147,13 @@ task-level deadline (see :ref:`task-level-deadline-alerts`):
     Measures time from when the task instance started running. Useful for catching tasks that
     run longer than expected once they begin.
 
+``DeadlineReference.TASKINSTANCE_LOGICAL_DATE``
+    Anchors a task-level deadline on the logical date of the task's Dag run.
+
+``DeadlineReference.TASKINSTANCE_FIXED_DATETIME``
+    Anchors a task-level deadline on a fixed point in time. Useful when a specific task must
+    complete by a wall-clock deadline.
+
 Here's an example using average runtime:
 
 .. code-block:: python
@@ -226,6 +233,20 @@ rather than the Dag run, using one of the task-instance references:
 
 ``DeadlineReference.TASKINSTANCE_STARTED_AT``
     Anchors on when the task instance started running.
+
+``DeadlineReference.TASKINSTANCE_LOGICAL_DATE``
+    Anchors on the logical date of the task's Dag run. The anchor is fixed when the run is
+    created, so the deadline is materialized as soon as the task is scheduled.
+
+``DeadlineReference.TASKINSTANCE_FIXED_DATETIME``
+    Anchors on a fixed point in time you pass in, independent of any task timestamp. Like the
+    logical-date anchor, the deadline is materialized when the task is scheduled.
+
+The ``TASKINSTANCE_LOGICAL_DATE`` and ``TASKINSTANCE_FIXED_DATETIME`` anchors don't depend on a
+per-attempt timestamp, so they materialize at scheduling time rather than at queue or start. A
+task that never reaches the scheduled state (for example, one that is never run) never
+materializes one of these deadlines; use a Dag-level deadline if you need a need-by time that is
+independent of whether a given task runs.
 
 The alert fires if the task hasn't finished by ``anchor_time + interval``. If the task finishes
 in time, the deadline is pruned and the callback never runs. Task-level deadlines are checked by

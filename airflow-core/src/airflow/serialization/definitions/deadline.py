@@ -217,6 +217,35 @@ class SerializedReferenceModels:
 
             return fetch_ti_anchor_from_db(TaskInstance.start_date, session=session, **kwargs)
 
+    class TaskInstanceLogicalDateDeadline(SerializedBaseDeadlineReference):
+        """A task deadline anchored on the logical date of the task's DagRun."""
+
+        required_kwargs = {"dag_id", "run_id"}
+
+        def _evaluate_with(self, *, session: Session, **kwargs: Any) -> datetime | None:
+            from airflow.models import DagRun
+
+            return _fetch_from_db(DagRun.logical_date, session=session, **kwargs)
+
+    @dataclass
+    class TaskInstanceFixedDatetimeDeadline(SerializedBaseDeadlineReference):
+        """A task deadline anchored on a fixed datetime."""
+
+        _datetime: datetime
+
+        def _evaluate_with(self, *, session: Session, **kwargs: Any) -> datetime | None:
+            return self._datetime
+
+        def serialize_reference(self) -> dict:
+            return {
+                SerializedReferenceModels.REFERENCE_TYPE_FIELD: self.reference_name,
+                "datetime": self._datetime.timestamp(),
+            }
+
+        @classmethod
+        def deserialize_reference(cls, reference_data: dict):
+            return cls(_datetime=timezone.from_timestamp(reference_data["datetime"]))
+
     @dataclass
     class AverageRuntimeDeadline(SerializedBaseDeadlineReference):
         """A deadline that calculates the average runtime from past DAG runs."""
@@ -391,6 +420,8 @@ SerializedReferenceModels.TYPES.DAGRUN = (
 )
 SerializedReferenceModels.TYPES.TASKINSTANCE_SCHEDULED = (
     SerializedReferenceModels.TaskInstanceScheduledAtDeadline,
+    SerializedReferenceModels.TaskInstanceLogicalDateDeadline,
+    SerializedReferenceModels.TaskInstanceFixedDatetimeDeadline,
 )
 SerializedReferenceModels.TYPES.TASKINSTANCE_QUEUED = (
     SerializedReferenceModels.TaskInstanceQueuedAtDeadline,

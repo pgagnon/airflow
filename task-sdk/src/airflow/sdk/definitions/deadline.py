@@ -100,6 +100,10 @@ class TaskInstanceStartedAtDeadline(BaseDeadlineReference):
     """A deadline that returns when a TaskInstance started."""
 
 
+class TaskInstanceLogicalDateDeadline(BaseDeadlineReference):
+    """A task deadline anchored on the logical date of the task's DagRun."""
+
+
 @dataclass
 class FixedDatetimeDeadline(BaseDeadlineReference):
     """A deadline that always returns a fixed datetime."""
@@ -114,6 +118,25 @@ class FixedDatetimeDeadline(BaseDeadlineReference):
 
     @classmethod
     def deserialize_reference(cls, reference_data: dict[str, Any]) -> FixedDatetimeDeadline:
+        from airflow.sdk._shared.timezones import timezone
+
+        return cls(_datetime=timezone.from_timestamp(reference_data["datetime"]))
+
+
+@dataclass
+class TaskInstanceFixedDatetimeDeadline(BaseDeadlineReference):
+    """A task deadline anchored on a fixed datetime."""
+
+    _datetime: datetime
+
+    def serialize_reference(self) -> dict[str, Any]:
+        return {
+            REFERENCE_TYPE_FIELD: self.reference_name,
+            "datetime": self._datetime.timestamp(),
+        }
+
+    @classmethod
+    def deserialize_reference(cls, reference_data: dict[str, Any]) -> TaskInstanceFixedDatetimeDeadline:
         from airflow.sdk._shared.timezones import timezone
 
         return cls(_datetime=timezone.from_timestamp(reference_data["datetime"]))
@@ -252,8 +275,14 @@ class DeadlineReference:
         # All DagRun-related deadline types.
         DAGRUN: DeadlineReferenceTypes = DAGRUN_CREATED + DAGRUN_QUEUED
 
-        # Deadlines that should be created when the TaskInstance is scheduled.
-        TASKINSTANCE_SCHEDULED: DeadlineReferenceTypes = (TaskInstanceScheduledAtDeadline,)
+        # Deadlines that should be created when the TaskInstance is scheduled. The
+        # fixed-datetime and logical-date anchors don't depend on a per-attempt timestamp,
+        # so they materialize at the earliest task hook (scheduling) alongside scheduled-at.
+        TASKINSTANCE_SCHEDULED: DeadlineReferenceTypes = (
+            TaskInstanceScheduledAtDeadline,
+            TaskInstanceLogicalDateDeadline,
+            TaskInstanceFixedDatetimeDeadline,
+        )
 
         # Deadlines that should be created when the TaskInstance is queued.
         TASKINSTANCE_QUEUED: DeadlineReferenceTypes = (TaskInstanceQueuedAtDeadline,)
@@ -271,6 +300,7 @@ class DeadlineReference:
     TASKINSTANCE_QUEUED_AT: DeadlineReferenceType = TaskInstanceQueuedAtDeadline()
     TASKINSTANCE_SCHEDULED_AT: DeadlineReferenceType = TaskInstanceScheduledAtDeadline()
     TASKINSTANCE_STARTED_AT: DeadlineReferenceType = TaskInstanceStartedAtDeadline()
+    TASKINSTANCE_LOGICAL_DATE: DeadlineReferenceType = TaskInstanceLogicalDateDeadline()
 
     @classmethod
     def AVERAGE_RUNTIME(cls, max_runs: int = 0, min_runs: int | None = None) -> DeadlineReferenceType:
@@ -283,6 +313,10 @@ class DeadlineReference:
     @classmethod
     def FIXED_DATETIME(cls, dt: datetime) -> DeadlineReferenceType:
         return FixedDatetimeDeadline(dt)
+
+    @classmethod
+    def TASKINSTANCE_FIXED_DATETIME(cls, dt: datetime) -> DeadlineReferenceType:
+        return TaskInstanceFixedDatetimeDeadline(dt)
 
     @classmethod
     def register_custom_reference(

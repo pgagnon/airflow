@@ -1315,3 +1315,54 @@ class TestProcessTaskInstanceDeadlineAlerts:
 
         deadlines = session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
         assert len(deadlines) == 1
+
+    def test_logical_date_deadline_materializes_at_scheduled(self, dag_maker, session):
+        """A task logical-date deadline materializes under TASKINSTANCE_SCHEDULED from the run's
+        logical_date, and is skipped under the queued/started buckets."""
+        from airflow.models.deadline import Deadline
+        from airflow.serialization.definitions.dag import _process_taskinstance_deadline_alerts
+        from airflow.serialization.definitions.deadline import SerializedReferenceModels
+
+        ti = self._make_ti(dag_maker, session, DeadlineReference.TASKINSTANCE_LOGICAL_DATE)
+
+        # Wrong bucket -> nothing materializes (the silent-skip case before this feature).
+        _process_taskinstance_deadline_alerts(
+            [ti], bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_QUEUED, session=session
+        )
+        session.flush()
+        assert session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all() == []
+
+        # Scheduled bucket materializes it from the DagRun's logical_date.
+        _process_taskinstance_deadline_alerts(
+            [ti], bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_SCHEDULED, session=session
+        )
+        session.flush()
+        deadlines = session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
+        assert len(deadlines) == 1
+        assert deadlines[0].deadline_time == DEFAULT_DATE + timedelta(minutes=5)
+
+    def test_fixed_datetime_deadline_materializes_at_scheduled(self, dag_maker, session):
+        """A task fixed-datetime deadline materializes under TASKINSTANCE_SCHEDULED from its embedded
+        datetime (no anchor timestamp needed), and is skipped under the queued bucket."""
+        from airflow.models.deadline import Deadline
+        from airflow.serialization.definitions.dag import _process_taskinstance_deadline_alerts
+        from airflow.serialization.definitions.deadline import SerializedReferenceModels
+
+        fixed_dt = DEFAULT_DATE + timedelta(days=1)
+        ti = self._make_ti(dag_maker, session, DeadlineReference.TASKINSTANCE_FIXED_DATETIME(fixed_dt))
+
+        # Wrong bucket -> nothing materializes.
+        _process_taskinstance_deadline_alerts(
+            [ti], bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_QUEUED, session=session
+        )
+        session.flush()
+        assert session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all() == []
+
+        # Scheduled bucket materializes it from the fixed datetime.
+        _process_taskinstance_deadline_alerts(
+            [ti], bucket=SerializedReferenceModels.TYPES.TASKINSTANCE_SCHEDULED, session=session
+        )
+        session.flush()
+        deadlines = session.scalars(select(Deadline).where(Deadline.task_instance_id == ti.id)).all()
+        assert len(deadlines) == 1
+        assert deadlines[0].deadline_time == fixed_dt + timedelta(minutes=5)
