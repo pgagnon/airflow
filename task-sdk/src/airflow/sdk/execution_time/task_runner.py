@@ -42,8 +42,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from pydantic import AwareDatetime, ConfigDict, Field, JsonValue, TypeAdapter
 from structlog.contextvars import bind_contextvars
 
-from airflow.dag_processing.bundles.base import BaseDagBundle, BundleVersionLock
-from airflow.dag_processing.bundles.manager import DagBundlesManager
+from airflow.sdk._core_compat import require_core
 from airflow.sdk._shared.observability.metrics import stats
 from airflow.sdk._shared.observability.traces import get_task_span_detail_level
 from airflow.sdk._shared.template_rendering import truncate_rendered_value
@@ -149,6 +148,8 @@ if TYPE_CHECKING:
     from pendulum.datetime import DateTime
     from structlog.typing import FilteringBoundLogger as Logger
 
+    from airflow.dag_processing.bundles.base import BaseDagBundle, BundleVersionLock  # noqa: SDK002
+    from airflow.dag_processing.bundles.manager import DagBundlesManager  # noqa: SDK002
     from airflow.sdk.definitions._internal.abstractoperator import AbstractOperator
     from airflow.sdk.definitions.context import Context
     from airflow.sdk.definitions.retry_policy import RetryDecision
@@ -994,7 +995,9 @@ def _register_deserialization_allowed_classes(dag, log: Logger) -> None:
 def parse(what: StartupDetails, log: Logger) -> RuntimeTaskInstance:
     # TODO: Task-SDK:
     # Using BundleDagBag here is about 98% wrong, but it'll do for now
-    from airflow.dag_processing.dagbag import BundleDagBag
+    with require_core("Parsing DAGs"):
+        from airflow.dag_processing.bundles.manager import DagBundlesManager  # noqa: SDK002
+        from airflow.dag_processing.dagbag import BundleDagBag  # noqa: SDK002
 
     bundle_info = what.bundle_info
     bundle_prepare_start = time.monotonic()
@@ -1902,7 +1905,7 @@ def _handle_trigger_dag_run(
 
     if drte.wait_for_completion:
         if drte.deferrable:
-            from airflow.providers.standard.triggers.external_task import DagStateTrigger
+            from airflow.providers.standard.triggers.external_task import DagStateTrigger  # noqa: SDK002
 
             defer = TaskDeferred(
                 trigger=DagStateTrigger(
@@ -1999,7 +2002,7 @@ def _send_error_email_notification(
 ) -> None:
     """Send email notification for task errors using SmtpNotifier."""
     try:
-        from airflow.providers.smtp.notifications.smtp import SmtpNotifier
+        from airflow.providers.smtp.notifications.smtp import SmtpNotifier  # noqa: SDK002
     except ImportError:
         log.error(
             "Failed to send task failure or retry email notification: "
@@ -2079,7 +2082,7 @@ def _execute_task(context: Context, ti: RuntimeTaskInstance, log: Logger):
                 assert isinstance(next_kwargs_data, dict)
             kwargs = deserialize(next_kwargs_data)
         except (ImportError, KeyError, AttributeError, TypeError):
-            from airflow.serialization.serialized_objects import BaseSerialization
+            from airflow.serialization.serialized_objects import BaseSerialization  # noqa: SDK002
 
             kwargs = BaseSerialization.deserialize(next_kwargs_data)
 
@@ -2326,6 +2329,8 @@ def main():
                     Status(StatusCode.ERROR, description=f"Exception: {type(reschedule).__name__}")
                 )
                 sys.exit(0)
+            with require_core("Running a task"):
+                from airflow.dag_processing.bundles.base import BundleVersionLock  # noqa: SDK002
             with BundleVersionLock(
                 bundle_name=ti.bundle_instance.name,
                 bundle_version=ti.bundle_instance.version,

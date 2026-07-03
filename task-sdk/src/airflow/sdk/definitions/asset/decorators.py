@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import attrs
 
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk._core_compat import require_core
 from airflow.sdk.definitions.asset import Asset, AssetAll, BaseAsset
 from airflow.sdk.exceptions import AirflowRuntimeError
 
@@ -32,11 +32,12 @@ if TYPE_CHECKING:
     from pydantic.types import JsonValue
     from typing_extensions import Self
 
+    from airflow.providers.standard.operators.python import PythonOperator  # noqa: SDK002
     from airflow.sdk import DAG, ObjectStoragePath
     from airflow.sdk.bases.decorator import _TaskDecorator
     from airflow.sdk.definitions.dag import DagStateChangeCallback, ScheduleArg
     from airflow.sdk.definitions.param import ParamsDict
-    from airflow.triggers.base import BaseTrigger
+    from airflow.triggers.base import BaseTrigger  # noqa: SDK002
 
 
 _INVALID_INLET_ASSET_NAMES = ("self", "context", "outlet_events")
@@ -52,55 +53,93 @@ def _validate_asset_function_arguments(f: Callable) -> None:
             raise TypeError(f"positional-only argument '{name}' without a default is not supported in @asset")
 
 
-class _AssetMainOperator(PythonOperator):
-    def __init__(self, *, definition_name: str, uri: str | None = None, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._definition_name = definition_name
+def _build_asset_main_operator_class() -> type:
+    """Build the ``_AssetMainOperator`` class lazily.
 
-    @classmethod
-    def from_definition(cls, definition: AssetDefinition | MultiAssetDefinition) -> Self:
-        _validate_asset_function_arguments(definition._function)
-        return cls(
-            task_id=definition._function.__name__,
-            inlets=[
-                Asset.ref(name=inlet_asset_name)
-                for inlet_asset_name, param in inspect.signature(definition._function).parameters.items()
-                if inlet_asset_name not in _INVALID_INLET_ASSET_NAMES
-                and param.default is inspect.Parameter.empty
-            ],
-            outlets=list(definition.iter_outlets()),
-            python_callable=definition._function,
-            definition_name=definition.name,
-        )
+    ``_AssetMainOperator`` subclasses ``PythonOperator`` from the standard
+    provider, which in turn requires airflow-core. Authoring an asset with
+    ``@asset`` must not pull either in, so the subclass is only created when an
+    asset task is actually instantiated. The import is routed through
+    :func:`require_core` so a missing install yields an actionable message.
+    """
+    with require_core("Instantiating an @asset task"):
+        from airflow.providers.standard.operators.python import PythonOperator  # noqa: SDK002
 
-    def _iter_kwargs(self, context: Mapping[str, Any]) -> Iterator[tuple[str, Any]]:
-        from airflow.sdk.execution_time.comms import ErrorResponse, GetAssetByName
-        from airflow.sdk.execution_time.task_runner import SUPERVISOR_COMMS
+    class _AssetMainOperator(PythonOperator):
+        def __init__(self, *, definition_name: str, uri: str | None = None, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self._definition_name = definition_name
 
-        def _fetch_asset(name: str) -> Asset:
-            resp = SUPERVISOR_COMMS.send(GetAssetByName(name=name))
-            if resp is None:
-                raise RuntimeError("Empty non-error response received")
-            if isinstance(resp, ErrorResponse):
-                raise AirflowRuntimeError(resp)
-            return Asset(**resp.model_dump(exclude={"type"}))
+        @classmethod
+        def from_definition(cls, definition: AssetDefinition | MultiAssetDefinition) -> Self:
+            _validate_asset_function_arguments(definition._function)
+            return cls(
+                task_id=definition._function.__name__,
+                inlets=[
+                    Asset.ref(name=inlet_asset_name)
+                    for inlet_asset_name, param in inspect.signature(definition._function).parameters.items()
+                    if inlet_asset_name not in _INVALID_INLET_ASSET_NAMES
+                    and param.default is inspect.Parameter.empty
+                ],
+                outlets=list(definition.iter_outlets()),
+                python_callable=definition._function,
+                definition_name=definition.name,
+            )
 
-        value: Any
-        for key, param in inspect.signature(self.python_callable).parameters.items():
-            if param.default is not inspect.Parameter.empty:
-                value = param.default
-            elif key == "self":
-                value = _fetch_asset(self._definition_name)
-            elif key == "context":
-                value = context
-            elif key == "outlet_events":
-                value = context["outlet_events"]
-            else:
-                value = _fetch_asset(key)
-            yield key, value
+        def _iter_kwargs(self, context: Mapping[str, Any]) -> Iterator[tuple[str, Any]]:
+            from airflow.sdk.execution_time.comms import ErrorResponse, GetAssetByName
+            from airflow.sdk.execution_time.task_runner import SUPERVISOR_COMMS
 
-    def determine_kwargs(self, context: Mapping[str, Any]) -> Mapping[str, Any]:
-        return dict(self._iter_kwargs(context))
+            def _fetch_asset(name: str) -> Asset:
+                resp = SUPERVISOR_COMMS.send(GetAssetByName(name=name))
+                if resp is None:
+                    raise RuntimeError("Empty non-error response received")
+                if isinstance(resp, ErrorResponse):
+                    raise AirflowRuntimeError(resp)
+                return Asset(**resp.model_dump(exclude={"type"}))
+
+            value: Any
+            for key, param in inspect.signature(self.python_callable).parameters.items():
+                if param.default is not inspect.Parameter.empty:
+                    value = param.default
+                elif key == "self":
+                    value = _fetch_asset(self._definition_name)
+                elif key == "context":
+                    value = context
+                elif key == "outlet_events":
+                    value = context["outlet_events"]
+                else:
+                    value = _fetch_asset(key)
+                yield key, value
+
+        def determine_kwargs(self, context: Mapping[str, Any]) -> Mapping[str, Any]:
+            return dict(self._iter_kwargs(context))
+
+    return _AssetMainOperator
+
+
+def _get_asset_main_operator() -> type:
+    """Return the ``_AssetMainOperator`` class, building and caching it once.
+
+    The class is cached in module globals so its identity is stable: once built
+    (or accessed via ``__getattr__``), every later lookup returns the same object,
+    which keeps ``mock.patch`` of its methods working.
+    """
+    cls = globals().get("_AssetMainOperator")
+    if cls is None:
+        cls = _build_asset_main_operator_class()
+        globals()["_AssetMainOperator"] = cls
+    return cls
+
+
+def __getattr__(name: str):
+    # ``_AssetMainOperator`` is built lazily (it subclasses a provider operator),
+    # but callers and tests still reference it as a module attribute. Build it on
+    # first access and cache it so importing this module never pulls the standard
+    # provider (or core) in.
+    if name == "_AssetMainOperator":
+        return _get_asset_main_operator()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _instantiate_task(definition: AssetDefinition | MultiAssetDefinition) -> None:
@@ -112,7 +151,7 @@ def _instantiate_task(definition: AssetDefinition | MultiAssetDefinition) -> Non
         decorated_operator.kwargs["outlets"] = list(definition.iter_outlets())
         decorated_operator()
     else:
-        _AssetMainOperator.from_definition(definition)
+        _get_asset_main_operator().from_definition(definition)
 
 
 @attrs.define(kw_only=True)

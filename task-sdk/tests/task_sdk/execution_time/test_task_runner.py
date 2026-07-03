@@ -198,6 +198,38 @@ def get_inline_dag(dag_id: str, task: BaseOperator) -> DAG:
     return dag
 
 
+def test_import_task_runner_does_not_import_dag_processing():
+    """Importing task_runner must not drag airflow-core's dag_processing into sys.modules.
+
+    task_runner only needs the bundle classes at runtime in specific code paths
+    (parse/main), so the top-level imports must become guarded lazy imports.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    probe = textwrap.dedent(
+        """
+        import sys
+        import airflow.sdk.execution_time.task_runner  # noqa: F401
+
+        leaked = sorted(
+            name for name in sys.modules if name.startswith("airflow.dag_processing")
+        )
+        for name in leaked:
+            print(name)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    leaked = [line for line in result.stdout.splitlines() if line.strip()]
+    assert leaked == [], f"task_runner import leaked airflow.dag_processing modules: {leaked}"
+
+
 class CustomOperator(BaseOperator):
     def execute(self, context):
         task_id = context["task_instance"].task_id

@@ -16,6 +16,9 @@
 # under the License.
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 from unittest import mock
 
 import pytest
@@ -25,6 +28,60 @@ from airflow.sdk.definitions.asset.decorators import _AssetMainOperator, asset
 from airflow.sdk.definitions.decorators import task
 from airflow.sdk.execution_time.comms import AssetResult, GetAssetByName
 from airflow.sdk.execution_time.context import OutletEventAccessors
+
+
+class TestAssetDecoratorImportIsolation:
+    def test_importing_module_does_not_import_python_operator(self):
+        """Importing ``asset.decorators`` and accessing the ``asset`` factory must
+        not pull ``PythonOperator`` from the standard provider into sys.modules.
+
+        ``_AssetMainOperator`` subclasses ``PythonOperator`` (which requires
+        airflow-core), so the subclass must be built lazily on first
+        instantiation rather than at module load.
+        """
+        probe = textwrap.dedent(
+            """
+            import sys
+
+            import airflow.sdk.definitions.asset.decorators as mod
+            from airflow.sdk.definitions.asset.decorators import asset
+
+            # Touching the factory itself must not build the operator subclass.
+            assert asset is mod.asset
+
+            imported = "airflow.providers.standard.operators.python" in sys.modules
+            print("PYOP_IMPORTED:" + ("yes" if imported else "no"))
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        line = [ln for ln in result.stdout.splitlines() if ln.startswith("PYOP_IMPORTED:")][0]
+        assert line == "PYOP_IMPORTED:no", (
+            "Importing asset.decorators pulled PythonOperator into sys.modules; "
+            "the _AssetMainOperator subclass must be built lazily.\n" + result.stdout
+        )
+
+    def test_instantiating_asset_task_builds_operator_when_provider_present(self):
+        """Instantiating an asset task (via ``_AssetMainOperator.from_definition``)
+        is where the lazy build fires; it must produce a working subclass of the
+        standard provider's ``PythonOperator`` when the provider is installed."""
+        from airflow.providers.standard.operators.python import PythonOperator
+
+        def example_asset_func(self):
+            return 1
+
+        example_asset_func.__name__ = example_asset_func.__qualname__ = "example_asset_func"
+        definition = asset(schedule=None, name="custom_name")(example_asset_func)
+        op = _AssetMainOperator.from_definition(definition)
+
+        assert isinstance(op, PythonOperator)
+        assert op.task_id == "example_asset_func"
+        assert op.python_callable is example_asset_func
+        assert op._definition_name == "custom_name"
 
 
 @pytest.fixture

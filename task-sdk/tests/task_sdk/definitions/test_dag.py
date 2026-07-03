@@ -65,6 +65,54 @@ class TestDag:
             DAG(dag_id)
         assert str(ctx.value) == exc_value
 
+    def test_dag_module_does_not_import_core_settings(self):
+        """The dag definition module must not pull ``airflow.settings`` into its
+        namespace; the timezone hot path uses the SDK timezone instead."""
+        import airflow.sdk.definitions.dag as dag_module
+
+        assert "settings" not in vars(dag_module)
+
+    def test_dag_naive_start_date_does_not_import_core_settings(self, monkeypatch):
+        """Authoring a DAG with a naive start_date must resolve the timezone via the
+        SDK's own timezone, not by importing ``airflow.settings`` (airflow-core)."""
+        import sys
+
+        # Drop any previously-imported airflow.settings so we observe a fresh import.
+        monkeypatch.delitem(sys.modules, "airflow.settings", raising=False)
+
+        # Naive start_date forces the _extract_tz validator down the timezone path.
+        DAG("DAG", schedule=None, start_date=datetime(2019, 6, 1))
+
+        assert "airflow.settings" not in sys.modules
+
+    def test_dag_naive_start_date_uses_sdk_timezone(self):
+        """The resolved timezone for a naive start_date must match the SDK timezone."""
+        from airflow.sdk import timezone
+
+        dag = DAG("DAG", schedule=None, start_date=datetime(2019, 6, 1))
+        assert dag.timezone == timezone.TIMEZONE
+
+    def test_test_raises_friendly_message_without_core(self, monkeypatch):
+        """``Dag.test()`` routes its core imports through the guard, so a missing
+        airflow-core surfaces an actionable message instead of a bare ImportError."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            # Simulate airflow-core (and its serialization/models) being absent.
+            if name == "airflow" or name.startswith(
+                ("airflow.models", "airflow.serialization", "airflow.utils.types", "airflow.dag_processing")
+            ):
+                raise ImportError(f"No module named {name!r}")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        dag = DAG("DAG", schedule=None, start_date=DEFAULT_DATE)
+        with pytest.raises(ImportError, match="requires apache-airflow-core"):
+            dag.test()
+
     def test_dag_topological_sort_dag_without_tasks(self):
         dag = DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"})
 
@@ -1021,3 +1069,52 @@ class TestDagGetItem:
         dag = DAG("test_dag", schedule=None, start_date=DEFAULT_DATE)
         with pytest.raises(KeyError):
             dag["nonexistent"]
+
+
+class TestDagImportIsolation:
+    def test_authoring_dag_does_not_import_core_timetables(self):
+        """Authoring a DAG must not drag ``airflow.timetables.base`` (core) in.
+
+        ``_is_core_timetable`` runs on every DAG schedule. It must not import
+        the core ``Timetable`` module just to decide a plain schedule is not a
+        core timetable instance.
+        """
+        import subprocess
+        import sys
+        import textwrap
+
+        probe = textwrap.dedent(
+            """
+            import sys
+
+            from airflow.sdk import DAG
+
+            with DAG("import_isolation_probe"):
+                pass
+
+            print("airflow.timetables.base" in sys.modules)
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stdout.strip() == "False", (
+            "Authoring a DAG imported airflow.timetables.base (core leak). "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+    def test_core_timetable_still_detected_when_core_loaded(self):
+        """When core's Timetable module is already imported, a core timetable
+        instance is still recognised by ``_is_core_timetable``."""
+        from airflow.timetables.base import Timetable
+
+        from airflow.sdk.definitions.dag import _is_core_timetable
+
+        class _CoreTT(Timetable):
+            pass
+
+        assert _is_core_timetable(_CoreTT()) is True
+        assert _is_core_timetable(None) is False

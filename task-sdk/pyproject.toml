@@ -48,7 +48,6 @@ classifiers = [
     "Topic :: System :: Monitoring",
 ]
 dependencies = [
-    "apache-airflow-core<3.4.0,>=3.3.0",
     "asgiref>=2.3.0; python_version < '3.14'",
     "asgiref>=3.11.1; python_version >= '3.14'",
     "attrs>=24.2.0, !=25.2.0",
@@ -94,6 +93,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+"core" = [
+    "apache-airflow-core<3.4.0,>=3.3.0",
+]
 "sentry" = [
     "sentry-sdk>=2.30.0",
 ]

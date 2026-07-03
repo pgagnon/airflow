@@ -23,7 +23,6 @@ import logging
 from functools import cache
 from typing import TYPE_CHECKING
 
-from airflow import settings  # noqa: SDK002
 from airflow.sdk._shared.module_loading import import_string
 from airflow.sdk._shared.observability.metrics import stats
 from airflow.sdk._shared.plugins_manager import (
@@ -42,6 +41,16 @@ if TYPE_CHECKING:
     from airflow.sdk.lineage import HookLineageReader
 
 log = logging.getLogger(__name__)
+
+
+def _get_plugins_folder() -> str:
+    """Resolve the plugins folder from config, defaulting to ``$AIRFLOW_HOME/plugins``."""
+    import os
+
+    from airflow.sdk.configuration import get_sdk_expansion_variables
+
+    airflow_home = get_sdk_expansion_variables()["AIRFLOW_HOME"]
+    return conf.get("core", "plugins_folder", fallback=os.path.join(airflow_home, "plugins"))
 
 
 def _load_providers_plugins() -> tuple[list[AirflowPlugin], dict[str, str]]:
@@ -73,7 +82,8 @@ def _get_plugins() -> tuple[list[AirflowPlugin], dict[str, str]]:
 
     Plugins are only loaded if they have not been previously loaded.
     """
-    if not settings.PLUGINS_FOLDER:
+    plugins_folder = _get_plugins_folder()
+    if not plugins_folder:
         raise ValueError("Plugins folder is not set")
 
     log.debug("Loading plugins")
@@ -101,14 +111,14 @@ def _get_plugins() -> tuple[list[AirflowPlugin], dict[str, str]]:
         load_examples = conf.getboolean("core", "LOAD_EXAMPLES")
         __register_plugins(
             *_load_plugins_from_plugin_directory(
-                plugins_folder=settings.PLUGINS_FOLDER,
+                plugins_folder=plugins_folder,
                 load_examples=load_examples,
                 example_plugins_module="airflow.example_dags.plugins" if load_examples else None,
             )
         )
         __register_plugins(*_load_entrypoint_plugins())
 
-        if not settings.LAZY_LOAD_PROVIDERS:
+        if not conf.getboolean("core", "lazy_discover_providers", fallback=True):
             __register_plugins(*_load_providers_plugins())
 
     log.debug("Loading %d plugin(s) took %.2f ms", len(plugins), timer.duration)

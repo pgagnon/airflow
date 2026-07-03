@@ -1336,6 +1336,20 @@ def context_update_for_unmapped(context: Context, task: BaseOperator) -> None:
     )
 
 
+def get_airflow_context_vars(context: Mapping[str, Any]) -> dict[str, str]:
+    """
+    Return extra airflow context vars to inject into the default context vars.
+
+    This mirrors the ``get_airflow_context_vars`` policy hook from airflow-core. The
+    default implementation injects no extra vars and returns an empty dict. Deployments
+    that need cluster-specific context vars register them through the policy plugin,
+    which lives in airflow-core; on the Task SDK side, the default empty mapping applies.
+
+    :param context: The context for the task_instance of interest.
+    """
+    return {}
+
+
 def context_to_airflow_vars(context: Mapping[str, Any], in_env_var_format: bool = False) -> dict[str, str]:
     """
     Return values used to externally reconstruct relations between dags, dag_runs, tasks and task_instances.
@@ -1350,8 +1364,6 @@ def context_to_airflow_vars(context: Mapping[str, Any], in_env_var_format: bool 
     :return: task_instance context as dict.
     """
     from datetime import datetime
-
-    from airflow import settings  # noqa: SDK002
 
     params = {}
     if in_env_var_format:
@@ -1374,7 +1386,7 @@ def context_to_airflow_vars(context: Mapping[str, Any], in_env_var_format: bool 
         (dag_run, "team_name", "AIRFLOW_CONTEXT_TEAM_NAME"),
     ]
 
-    context_params = settings.get_airflow_context_vars(context)
+    context_params = get_airflow_context_vars(context)
     for key_raw, value in context_params.items():
         if not isinstance(key_raw, str):
             raise TypeError(f"key <{key_raw}> must be string")

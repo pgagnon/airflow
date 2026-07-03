@@ -212,8 +212,28 @@ class TestAirflowContextHelpers:
         assert env_vars["AIRFLOW_CTX_TEAM_NAME"] == "team-a"
         assert context_to_airflow_vars(context)["airflow.ctx.team_name"] == "team-a"
 
+    def test_context_to_airflow_vars_does_not_import_airflow_settings(self, monkeypatch):
+        """``context_to_airflow_vars`` must work without importing airflow-core's ``airflow.settings``."""
+        import builtins
+        import sys
+
+        # Drop any cached airflow.settings and make a fresh import of it fail.
+        monkeypatch.delitem(sys.modules, "airflow.settings", raising=False)
+        real_import = builtins.__import__
+
+        def _blocked_import(name, *args, **kwargs):
+            if name == "airflow.settings" or name == "airflow" and "settings" in (args[2] or ()):
+                raise AssertionError("context_to_airflow_vars must not import airflow.settings")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _blocked_import)
+
+        # Default (no policy plugin) injects no extra vars; base context still maps cleanly.
+        assert context_to_airflow_vars({}) == {}
+
     def test_context_to_airflow_vars_from_policy(self):
-        with mock.patch("airflow.settings.get_airflow_context_vars") as mock_method:
+        hook = "airflow.sdk.execution_time.context.get_airflow_context_vars"
+        with mock.patch(hook) as mock_method:
             airflow_cluster = "cluster-a"
             mock_method.return_value = {"airflow_cluster": airflow_cluster}
 
@@ -223,13 +243,13 @@ class TestAirflowContextHelpers:
             context_vars = context_to_airflow_vars({}, in_env_var_format=True)
             assert context_vars["AIRFLOW_CTX_AIRFLOW_CLUSTER"] == airflow_cluster
 
-        with mock.patch("airflow.settings.get_airflow_context_vars") as mock_method:
+        with mock.patch(hook) as mock_method:
             mock_method.return_value = {"airflow_cluster": [1, 2]}
             with pytest.raises(TypeError) as error:
                 context_to_airflow_vars({})
             assert str(error.value) == "value of key <airflow_cluster> must be string, not <class 'list'>"
 
-        with mock.patch("airflow.settings.get_airflow_context_vars") as mock_method:
+        with mock.patch(hook) as mock_method:
             mock_method.return_value = {1: "value"}
             with pytest.raises(TypeError) as error:
                 context_to_airflow_vars({})

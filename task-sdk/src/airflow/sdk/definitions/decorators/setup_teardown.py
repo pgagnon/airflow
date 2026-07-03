@@ -29,10 +29,21 @@ if TYPE_CHECKING:
     from airflow.sdk.bases.decorator import _TaskDecorator
     from airflow.sdk.definitions.xcom_arg import XComArg
 
-try:
-    from airflow.providers.standard.decorators.python import python_task
-except (ImportError, AttributeError):
-    from airflow.decorators import python_task  # type: ignore
+
+def _python_task(func: Callable) -> Callable:
+    """Resolve the ``python_task`` decorator lazily.
+
+    Importing the standard provider's ``python_task`` at module load drags the
+    whole ``airflow.providers.standard`` operator stack (and airflow-core modules
+    such as ``airflow.models.variable``) into ``sys.modules``. It is only needed
+    when ``@setup``/``@teardown`` wrap a bare function, so resolve it on demand.
+    """
+    try:
+        from airflow.providers.standard.decorators.python import python_task
+    except (ImportError, AttributeError):
+        from airflow.decorators import python_task  # type: ignore
+
+    return python_task(func)
 
 
 def setup_task(func: Callable) -> Callable:
@@ -50,7 +61,7 @@ def setup_task(func: Callable) -> Callable:
     """
     # Using FunctionType here since _TaskDecorator is also a callable
     if isinstance(func, types.FunctionType):
-        func = python_task(func)
+        func = _python_task(func)
     if isinstance(func, _TaskGroupFactory):
         raise AirflowException("Task groups cannot be marked as setup or teardown.")
     func = cast("_TaskDecorator", func)
@@ -75,7 +86,7 @@ def teardown_task(_func=None, *, on_failure_fail_dagrun: bool = False) -> Callab
     def teardown(func: Callable) -> Callable:
         # Using FunctionType here since _TaskDecorator is also a callable
         if isinstance(func, types.FunctionType):
-            func = python_task(func)
+            func = _python_task(func)
         if isinstance(func, _TaskGroupFactory):
             raise AirflowException("Task groups cannot be marked as setup or teardown.")
         func = cast("_TaskDecorator", func)

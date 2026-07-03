@@ -4450,11 +4450,14 @@ name = "apache-airflow-providers-common-compat"
 version = "1.15.0"
 source = { editable = "providers/common/compat" }
 dependencies = [
-    { name = "apache-airflow" },
+    { name = "apache-airflow-task-sdk" },
     { name = "asgiref" },
 ]
 
 [package.optional-dependencies]
+core = [
+    { name = "apache-airflow-core" },
+]
 openlineage = [
     { name = "apache-airflow-providers-openlineage" },
 ]
@@ -4475,13 +4478,14 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "apache-airflow", editable = "." },
+    { name = "apache-airflow-core", marker = "extra == 'core'", editable = "airflow-core" },
     { name = "apache-airflow-providers-openlineage", marker = "extra == 'openlineage'", editable = "providers/openlineage" },
     { name = "apache-airflow-providers-standard", marker = "extra == 'standard'", editable = "providers/standard" },
+    { name = "apache-airflow-task-sdk", editable = "task-sdk" },
     { name = "asgiref", marker = "python_full_version < '3.14'", specifier = ">=2.3.0" },
     { name = "asgiref", marker = "python_full_version >= '3.14'", specifier = ">=3.11.1" },
 ]
-provides-extras = ["openlineage", "standard"]
+provides-extras = ["core", "openlineage", "standard"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4587,8 +4591,8 @@ name = "apache-airflow-providers-common-sql"
 version = "2.0.1"
 source = { editable = "providers/common/sql" }
 dependencies = [
-    { name = "apache-airflow" },
     { name = "apache-airflow-providers-common-compat" },
+    { name = "apache-airflow-task-sdk" },
     { name = "methodtools" },
     { name = "more-itertools" },
     { name = "sqlparse" },
@@ -4600,6 +4604,9 @@ amazon = [
 ]
 apache-iceberg = [
     { name = "apache-airflow-providers-apache-iceberg" },
+]
+core = [
+    { name = "apache-airflow-core" },
 ]
 datafusion = [
     { name = "datafusion" },
@@ -4644,11 +4651,12 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "apache-airflow", editable = "." },
+    { name = "apache-airflow-core", marker = "extra == 'core'", editable = "airflow-core" },
     { name = "apache-airflow-providers-amazon", marker = "extra == 'amazon'", editable = "providers/amazon" },
     { name = "apache-airflow-providers-apache-iceberg", marker = "extra == 'apache-iceberg'", editable = "providers/apache/iceberg" },
     { name = "apache-airflow-providers-common-compat", editable = "providers/common/compat" },
     { name = "apache-airflow-providers-openlineage", marker = "extra == 'openlineage'", editable = "providers/openlineage" },
+    { name = "apache-airflow-task-sdk", editable = "task-sdk" },
     { name = "datafusion", marker = "extra == 'datafusion'", specifier = ">=50.0.0,<52.0.0" },
     { name = "methodtools", specifier = ">=0.4.7" },
     { name = "more-itertools", specifier = ">=9.0.0" },
@@ -4660,7 +4668,7 @@ requires-dist = [
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=1.4.54" },
     { name = "sqlparse", specifier = ">=0.5.1" },
 ]
-provides-extras = ["pandas", "openlineage", "polars", "sqlalchemy", "amazon", "datafusion", "pyiceberg-core", "apache-iceberg"]
+provides-extras = ["core", "pandas", "openlineage", "polars", "sqlalchemy", "amazon", "datafusion", "pyiceberg-core", "apache-iceberg"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -5788,8 +5796,8 @@ version = "6.0.4"
 source = { editable = "providers/http" }
 dependencies = [
     { name = "aiohttp" },
-    { name = "apache-airflow" },
     { name = "apache-airflow-providers-common-compat" },
+    { name = "apache-airflow-task-sdk" },
     { name = "asgiref" },
     { name = "pydantic" },
     { name = "requests" },
@@ -5810,8 +5818,8 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.0" },
-    { name = "apache-airflow", editable = "." },
     { name = "apache-airflow-providers-common-compat", editable = "providers/common/compat" },
+    { name = "apache-airflow-task-sdk", editable = "task-sdk" },
     { name = "asgiref", marker = "python_full_version < '3.14'", specifier = ">=2.3.0" },
     { name = "asgiref", marker = "python_full_version >= '3.14'", specifier = ">=3.11.1" },
     { name = "pydantic", specifier = ">=2.11.0" },
@@ -7610,8 +7618,8 @@ version = "3.0.1"
 source = { editable = "providers/smtp" }
 dependencies = [
     { name = "aiosmtplib" },
-    { name = "apache-airflow" },
     { name = "apache-airflow-providers-common-compat" },
+    { name = "apache-airflow-task-sdk" },
 ]
 
 [package.dev-dependencies]
@@ -7628,8 +7636,8 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "aiosmtplib", specifier = ">=0.1.6" },
-    { name = "apache-airflow", editable = "." },
     { name = "apache-airflow-providers-common-compat", editable = "providers/common/compat" },
+    { name = "apache-airflow-task-sdk", editable = "task-sdk" },
 ]
 
 [package.metadata.requires-dev]
@@ -7794,11 +7802,14 @@ name = "apache-airflow-providers-standard"
 version = "1.15.0"
 source = { editable = "providers/standard" }
 dependencies = [
-    { name = "apache-airflow" },
     { name = "apache-airflow-providers-common-compat" },
+    { name = "apache-airflow-task-sdk" },
 ]
 
 [package.optional-dependencies]
+core = [
+    { name = "apache-airflow-core" },
+]
 openlineage = [
     { name = "apache-airflow-providers-openlineage" },
 ]
@@ -7818,11 +7829,12 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "apache-airflow", editable = "." },
+    { name = "apache-airflow-core", marker = "extra == 'core'", editable = "airflow-core" },
     { name = "apache-airflow-providers-common-compat", editable = "providers/common/compat" },
     { name = "apache-airflow-providers-openlineage", marker = "extra == 'openlineage'", editable = "providers/openlineage" },
+    { name = "apache-airflow-task-sdk", editable = "task-sdk" },
 ]
-provides-extras = ["openlineage"]
+provides-extras = ["core", "openlineage"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -8806,7 +8818,6 @@ mypy = [{ name = "apache-airflow-devel-common", extras = ["mypy"], editable = "d
 name = "apache-airflow-task-sdk"
 source = { editable = "task-sdk" }
 dependencies = [
-    { name = "apache-airflow-core" },
     { name = "asgiref" },
     { name = "attrs" },
     { name = "babel" },
@@ -8842,6 +8853,9 @@ all = [
     { name = "opentelemetry-proto" },
     { name = "sentry-sdk" },
     { name = "statsd" },
+]
+core = [
+    { name = "apache-airflow-core" },
 ]
 datadog = [
     { name = "datadog" },
@@ -8880,7 +8894,7 @@ mypy = [
 
 [package.metadata]
 requires-dist = [
-    { name = "apache-airflow-core", editable = "airflow-core" },
+    { name = "apache-airflow-core", marker = "extra == 'core'", editable = "airflow-core" },
     { name = "asgiref", marker = "python_full_version < '3.14'", specifier = ">=2.3.0" },
     { name = "asgiref", marker = "python_full_version >= '3.14'", specifier = ">=3.11.1" },
     { name = "attrs", specifier = ">=24.2.0,!=25.2.0" },
@@ -8920,7 +8934,7 @@ requires-dist = [
     { name = "tenacity", specifier = ">=8.3.0" },
     { name = "typing-extensions", specifier = ">=4.14.1" },
 ]
-provides-extras = ["all", "datadog", "otel", "sentry", "statsd"]
+provides-extras = ["all", "core", "datadog", "otel", "sentry", "statsd"]
 
 [package.metadata.requires-dev]
 codegen = [

@@ -18,6 +18,9 @@
 from __future__ import annotations
 
 # We don't want to `import *` here to avoid the risk of making adding too much to Public python API
+from typing import TYPE_CHECKING
+
+from airflow.sdk._shared.timezones import timezone as _timezone
 from airflow.sdk._shared.timezones.timezone import (
     coerce_datetime,
     convert_to_utc,
@@ -30,6 +33,9 @@ from airflow.sdk._shared.timezones.timezone import (
     utcnow,
 )
 
+if TYPE_CHECKING:
+    from pendulum.tz.timezone import FixedTimezone, Timezone
+
 try:
     from airflow.sdk.configuration import conf
 
@@ -38,11 +44,27 @@ try:
 except Exception:
     initialize("UTC")
 
+
+def local_timezone() -> FixedTimezone | Timezone:
+    """Return the timezone the SDK was initialized with (the default/local timezone)."""
+    return _timezone._Timezone.initialized_timezone
+
+
+def __getattr__(name: str):
+    # ``TIMEZONE`` is the SDK's replacement for ``airflow.settings.TIMEZONE``. It
+    # is exposed lazily so it always reflects the currently-initialized timezone.
+    if name == "TIMEZONE":
+        return _timezone._Timezone.initialized_timezone
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
+    "TIMEZONE",
     "coerce_datetime",
     "convert_to_utc",
     "datetime",
     "from_timestamp",
+    "local_timezone",
     "make_naive",
     "parse",
     "utc",

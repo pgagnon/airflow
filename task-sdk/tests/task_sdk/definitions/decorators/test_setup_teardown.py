@@ -17,6 +17,10 @@
 # under the License.
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+
 import pytest
 
 from airflow.providers.standard.operators.bash import BashOperator
@@ -52,6 +56,47 @@ def make_task(name, type_, setup_=False, teardown_=False):
         pass
 
     return my_task.override(task_id=name)()
+
+
+def test_importing_setup_teardown_does_not_import_standard_provider():
+    """Importing the SDK setup/teardown decorators must not eagerly pull in the
+    ``airflow.providers.standard`` operator/decorator stack (which in turn drags
+    airflow-core modules such as ``airflow.models.variable`` into ``sys.modules``).
+
+    The ``python_task`` fallback is only needed when ``@setup``/``@teardown`` wrap a
+    bare function, so it should be imported lazily inside those functions.
+    """
+    probe = textwrap.dedent(
+        """
+        import sys
+
+        import airflow  # establish the unavoidable namespace-root baseline
+
+        baseline = set(sys.modules)
+
+        import airflow.sdk.definitions.decorators.setup_teardown  # noqa: F401
+
+        leaked = sorted(
+            name
+            for name in set(sys.modules) - baseline
+            if name.startswith("airflow.providers.standard")
+            or name == "airflow.models.variable"
+        )
+        for name in leaked:
+            print(name)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    leaked = [line for line in result.stdout.splitlines() if line.strip()]
+    assert leaked == [], (
+        "Importing airflow.sdk.definitions.decorators.setup_teardown leaked "
+        f"{len(leaked)} provider/core module(s) at import time: {leaked}"
+    )
 
 
 class TestSetupTearDownTask:

@@ -27,13 +27,12 @@ from __future__ import annotations
 
 import warnings
 
-# Note: This import from airflow-core is ok, as this is a compatibility module which we will remove in 3.2 anyways
-from airflow.utils.deprecation_tools import DeprecatedImportWarning
+from airflow.sdk.exceptions import RemovedInAirflow4Warning
 
 warnings.warn(
     "Importing from 'airflow.sdk.execution_time.secrets_masker' is deprecated and will be removed in a future version. "
     "Please use 'airflow.sdk._shared.secrets_masker' instead.",
-    DeprecatedImportWarning,
+    RemovedInAirflow4Warning,
     stacklevel=2,
 )
 

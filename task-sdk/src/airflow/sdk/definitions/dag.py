@@ -39,8 +39,8 @@ import attrs
 import jinja2
 from dateutil.relativedelta import relativedelta
 
-from airflow import settings
 from airflow.sdk import TaskInstanceState, TriggerRule, XComArg
+from airflow.sdk._core_compat import require_core
 from airflow.sdk.bases.operator import BaseOperator
 from airflow.sdk.bases.timetable import BaseTimetable
 from airflow.sdk.definitions._internal.node import DAGNode, validate_key
@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from pendulum.tz.timezone import FixedTimezone, Timezone
     from typing_extensions import Self, TypeIs
 
-    from airflow.models.taskinstance import TaskInstance as SchedulerTaskInstance
+    from airflow.models.taskinstance import TaskInstance as SchedulerTaskInstance  # noqa: SDK002
     from airflow.sdk.api.datamodels._generated import DagRunType
     from airflow.sdk.definitions.decorators import TaskDecoratorCollection
     from airflow.sdk.definitions.edges import EdgeInfoType
@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from airflow.sdk.definitions.taskgroup import TaskGroup
     from airflow.sdk.definitions.xcom_arg import PlainXComArg
     from airflow.sdk.execution_time.supervisor import TaskRunResult
-    from airflow.timetables.base import DataInterval, Timetable as CoreTimetable
+    from airflow.timetables.base import DataInterval, Timetable as CoreTimetable  # noqa: SDK002
 
     Operator: TypeAlias = BaseOperator | MappedOperator
 
@@ -124,11 +124,15 @@ _DAG_HASH_ATTRS = frozenset(
 
 
 def _is_core_timetable(schedule: ScheduleArg) -> TypeIs[CoreTimetable]:
-    try:
-        from airflow.timetables.base import Timetable
-    except ImportError:
+    # A ``schedule`` can only be an instance of the core ``Timetable`` if that
+    # module has already been imported by whoever constructed it. If core's
+    # timetable module isn't in ``sys.modules`` yet, no live object can be an
+    # instance of it, so we avoid importing (and thus leaking) airflow-core
+    # during plain DAG authoring.
+    core_timetable_mod = sys.modules.get("airflow.timetables.base")
+    if core_timetable_mod is None:
         return False
-    return isinstance(schedule, Timetable)
+    return isinstance(schedule, core_timetable_mod.Timetable)
 
 
 def _create_timetable(interval: ScheduleInterval, timezone: Timezone | FixedTimezone) -> BaseTimetable:
@@ -689,10 +693,10 @@ class DAG:
         if start_date:
             if not isinstance(start_date, datetime):
                 start_date = timezone.parse(start_date)
-            tzinfo = start_date.tzinfo or settings.TIMEZONE
+            tzinfo = start_date.tzinfo or timezone.TIMEZONE
             tz = pendulum.instance(start_date, tz=tzinfo).timezone
         else:
-            tz = settings.TIMEZONE
+            tz = timezone.TIMEZONE
 
         return tz
 
@@ -1174,7 +1178,8 @@ class DAG:
         """Exposes a CLI specific to this Dag."""
         self.check_cycle()
 
-        from airflow.cli import cli_parser
+        with require_core("Dag.cli()"):
+            from airflow.cli import cli_parser  # noqa: SDK002
 
         parser = cli_parser.get_parser(dag_parser=True)
         args = parser.parse_args()
@@ -1244,13 +1249,15 @@ class DAG:
         from contextlib import ExitStack
         from unittest.mock import patch
 
-        from airflow import settings
-        from airflow.models.dagrun import DagRun, get_or_create_dagrun
         from airflow.sdk import DagRunState, timezone
-        from airflow.serialization.definitions.dag import SerializedDAG
-        from airflow.serialization.encoders import coerce_to_core_timetable
-        from airflow.serialization.serialized_objects import DagSerialization
-        from airflow.utils.types import DagRunTriggeredByType, DagRunType
+
+        with require_core("Dag.test()"):
+            from airflow import settings  # noqa: SDK002
+            from airflow.models.dagrun import DagRun, get_or_create_dagrun  # noqa: SDK002
+            from airflow.serialization.definitions.dag import SerializedDAG  # noqa: SDK002
+            from airflow.serialization.encoders import coerce_to_core_timetable  # noqa: SDK002
+            from airflow.serialization.serialized_objects import DagSerialization  # noqa: SDK002
+            from airflow.utils.types import DagRunTriggeredByType, DagRunType  # noqa: SDK002
 
         exit_stack = ExitStack()
 
@@ -1301,10 +1308,11 @@ class DAG:
                 data_interval = timetable.infer_manual_data_interval(run_after=logical_date)
             # These imports are intentionally lazy: this Task SDK module must not
             # pull in airflow-core at import time (worker isolation).
-            from airflow.dag_processing.bundles.manager import DagBundlesManager
-            from airflow.dag_processing.dagbag import BundleDagBag, sync_bag_to_db
-            from airflow.models.dag import DagModel
-            from airflow.models.dag_version import DagVersion
+            with require_core("Dag.test()"):
+                from airflow.dag_processing.bundles.manager import DagBundlesManager  # noqa: SDK002
+                from airflow.dag_processing.dagbag import BundleDagBag, sync_bag_to_db  # noqa: SDK002
+                from airflow.models.dag import DagModel  # noqa: SDK002
+                from airflow.models.dag_version import DagVersion  # noqa: SDK002
 
             manager = DagBundlesManager()
             manager.sync_bundles_to_db(session=session)
@@ -1387,7 +1395,8 @@ class DAG:
             # - if ``use_executor`` is True, sends workloads to the executor with
             #   ``BaseExecutor.queue_workload``
             if use_executor:
-                from airflow.executors.base_executor import ExecutorLoader
+                with require_core("Dag.test(use_executor=True)"):
+                    from airflow.executors.base_executor import ExecutorLoader  # noqa: SDK002
 
                 executor = ExecutorLoader.get_default_executor()
                 executor.start()
@@ -1424,9 +1433,10 @@ class DAG:
 
                         from pathlib import Path
 
-                        from airflow.executors import workloads
-                        from airflow.executors.base_executor import ExecutorLoader
-                        from airflow.executors.workloads import BundleInfo
+                        with require_core("Dag.test(use_executor=True)"):
+                            from airflow.executors import workloads  # noqa: SDK002
+                            from airflow.executors.base_executor import ExecutorLoader  # noqa: SDK002
+                            from airflow.executors.workloads import BundleInfo  # noqa: SDK002
 
                         workload = workloads.ExecuteTask.make(
                             ti,
@@ -1455,8 +1465,9 @@ class DAG:
                     executor.heartbeat()
                     session.expire_all()
 
-                    from airflow.jobs.scheduler_job_runner import SchedulerJobRunner
-                    from airflow.models.dagbag import DBDagBag
+                    with require_core("Dag.test(use_executor=True)"):
+                        from airflow.jobs.scheduler_job_runner import SchedulerJobRunner  # noqa: SDK002
+                        from airflow.models.dagbag import DBDagBag  # noqa: SDK002
 
                     SchedulerJobRunner.process_executor_events(
                         executor=executor, job_id=None, scheduler_dag_bag=DBDagBag(), session=session
@@ -1480,7 +1491,9 @@ def _run_task(
     """
     from airflow.sdk._shared.module_loading import import_string
     from airflow.sdk.serde import deserialize, serialize
-    from airflow.utils.session import create_session
+
+    with require_core("Dag.test()"):
+        from airflow.utils.session import create_session  # noqa: SDK002
 
     taskrun_result: TaskRunResult | None
     log.info("[DAG TEST] starting task_id=%s map_index=%s", ti.task_id, ti.map_index)
@@ -1491,7 +1504,9 @@ def _run_task(
             from airflow.sdk.api.datamodels._generated import TaskInstance as TaskInstanceSDK
             from airflow.sdk.execution_time.comms import DeferTask
             from airflow.sdk.execution_time.supervisor import run_task_in_process
-            from airflow.serialization.serialized_objects import create_scheduler_operator
+
+            with require_core("Dag.test()"):
+                from airflow.serialization.serialized_objects import create_scheduler_operator  # noqa: SDK002
 
             # The API Server expects the task instance to be in QUEUED state before
             # it is run.
