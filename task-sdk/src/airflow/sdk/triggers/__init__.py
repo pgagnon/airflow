@@ -15,16 +15,11 @@
 # specific language governing permissions and limitations
 # under the License.
 """
-Backwards-compatible re-export of the trigger base classes.
+Public Task SDK home for trigger base classes.
 
-The canonical definitions now live in the Task SDK at
-:mod:`airflow.sdk.triggers`. airflow-core depends on the Task SDK, so this
-module re-exports from there to keep the historical ``airflow.triggers.base``
-import path working for the airflow-core modules and providers that import from
-here.
-
-New code in the SDK and in providers should import from ``airflow.sdk.triggers``
-instead (see :mod:`airflow.sdk.triggers`).
+This package is the canonical location for the trigger base classes and the
+import path that providers and the SDK should use. The legacy
+``airflow.triggers.base`` path re-exports from here for backwards compatibility.
 """
 
 from __future__ import annotations
