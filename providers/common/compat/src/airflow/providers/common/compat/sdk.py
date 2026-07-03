@@ -15,17 +15,15 @@
 # specific language governing permissions and limitations
 # under the License.
 """
-Airflow compatibility imports for seamless migration from Airflow 2 to Airflow 3.
+Airflow compatibility imports for providers.
 
-This module provides lazy imports that automatically try Airflow 3 paths first,
-then fall back to Airflow 2 paths, enabling code to work across both versions.
+This module provides lazy imports that resolve Airflow 3 paths, giving providers a
+single stable import surface regardless of where a symbol lives in airflow-core.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-
-from airflow.providers.common.compat.version_compat import AIRFLOW_V_3_0_PLUS
 
 if TYPE_CHECKING:
     import airflow.sdk.io as io  # noqa: F401
@@ -109,13 +107,10 @@ if TYPE_CHECKING:
     from airflow.sdk.listener import get_listener_manager as get_listener_manager
     from airflow.sdk.log import redact as redact
     from airflow.sdk.plugins_manager import AirflowPlugin as AirflowPlugin
-
-    # Airflow 3-only exceptions (conditionally imported)
-    if AIRFLOW_V_3_0_PLUS:
-        from airflow.sdk.exceptions import (
-            DagRunTriggerException as DagRunTriggerException,
-            DownstreamTasksSkipped as DownstreamTasksSkipped,
-        )
+    from airflow.sdk.exceptions import (
+        DagRunTriggerException as DagRunTriggerException,
+        DownstreamTasksSkipped as DownstreamTasksSkipped,
+    )
     from airflow.sdk.execution_time.context import (
         AIRFLOW_VAR_NAME_FORMAT_MAPPING as AIRFLOW_VAR_NAME_FORMAT_MAPPING,
         context_to_airflow_vars as context_to_airflow_vars,
@@ -127,25 +122,18 @@ if TYPE_CHECKING:
 
 from airflow.providers.common.compat._compat_utils import create_module_getattr
 
-# Rename map for classes that changed names between Airflow 2.x and 3.x
-# Format: new_name -> (new_path, old_path, old_name)
-_RENAME_MAP: dict[str, tuple[str, str, str]] = {
-    # Assets: Dataset -> Asset rename in Airflow 3.0
-    "Asset": ("airflow.sdk", "airflow.datasets", "Dataset"),
-    "AssetAlias": ("airflow.sdk", "airflow.datasets", "DatasetAlias"),
-    "AssetAll": ("airflow.sdk", "airflow.datasets", "DatasetAll"),
-    "AssetAny": ("airflow.sdk", "airflow.datasets", "DatasetAny"),
-}
-
-# Airflow 3-only renames (not available in Airflow 2)
-_AIRFLOW_3_ONLY_RENAMES: dict[str, tuple[str, str, str]] = {}
-
-
 # Import map for classes/functions/constants
 # Format: class_name -> module_path(s)
 # - str: single module path (no fallback)
-# - tuple[str, ...]: multiple module paths (try in order, newest first)
+# - tuple[str, ...]: multiple module paths (try in order)
 _IMPORT_MAP: dict[str, str | tuple[str, ...]] = {
+    # ============================================================================
+    # Assets (Dataset -> Asset rename happened in Airflow 3.0)
+    # ============================================================================
+    "Asset": "airflow.sdk",
+    "AssetAlias": "airflow.sdk",
+    "AssetAll": "airflow.sdk",
+    "AssetAny": "airflow.sdk",
     # ============================================================================
     # Hooks
     # ============================================================================
@@ -196,11 +184,9 @@ _IMPORT_MAP: dict[str, str | tuple[str, ...]] = {
     "DecoratedMappedOperator": ("airflow.sdk.bases.decorator", "airflow.decorators.base"),
     "MappedOperator": ("airflow.sdk.definitions.mappedoperator", "airflow.models.mappedoperator"),
     # ============================================================================
-    # Assets (Dataset → Asset rename in Airflow 3.0)
+    # Asset metadata
     # ============================================================================
-    # Note: Asset, AssetAlias, AssetAll, AssetAny are handled by _RENAME_MAP
-    # Metadata moved from airflow.datasets.metadata (2.x) to airflow.sdk (3.x)
-    "Metadata": ("airflow.sdk", "airflow.datasets.metadata"),
+    "Metadata": "airflow.sdk",
     # ============================================================================
     # Notifiers
     # ============================================================================
@@ -268,7 +254,6 @@ _IMPORT_MAP: dict[str, str | tuple[str, ...]] = {
     "HookLineageReader": ("airflow.sdk.lineage", "airflow.lineage.hook"),
     "get_hook_lineage_collector": ("airflow.sdk.lineage", "airflow.lineage.hook"),
     "HookLineage": ("airflow.sdk.lineage", "airflow.lineage.hook"),
-    # Note: AssetLineageInfo is handled by _RENAME_MAP (DatasetLineageInfo -> AssetLineageInfo)
     "NoOpCollector": ("airflow.sdk.lineage", "airflow.lineage.hook"),
     # ============================================================================
     # Exceptions (deprecated in airflow.exceptions, prefer SDK)
@@ -309,20 +294,16 @@ _IMPORT_MAP: dict[str, str | tuple[str, ...]] = {
     "AirflowConfigException": ("airflow.sdk.exceptions", "airflow.exceptions"),
 }
 
-# Airflow 3-only exceptions (not available in Airflow 2)
-_AIRFLOW_3_ONLY_EXCEPTIONS: dict[str, tuple[str, ...]] = {
-    "DownstreamTasksSkipped": ("airflow.sdk.exceptions", "airflow.exceptions"),
-    "DagRunTriggerException": ("airflow.sdk.exceptions", "airflow.exceptions"),
-}
-
-# Add Airflow 3-only exceptions and renames to _IMPORT_MAP if running Airflow 3+
-if AIRFLOW_V_3_0_PLUS:
-    _IMPORT_MAP.update(_AIRFLOW_3_ONLY_EXCEPTIONS)
-    _RENAME_MAP.update(_AIRFLOW_3_ONLY_RENAMES)
-    # AssetLineageInfo exists in 3.0+ but location changed in 3.2
-    # 3.0-3.1: airflow.lineage.hook.AssetLineageInfo
-    # 3.2+: airflow.sdk.lineage.AssetLineageInfo
-    _IMPORT_MAP["AssetLineageInfo"] = ("airflow.sdk.lineage", "airflow.lineage.hook")
+_IMPORT_MAP.update(
+    {
+        "DownstreamTasksSkipped": ("airflow.sdk.exceptions", "airflow.exceptions"),
+        "DagRunTriggerException": ("airflow.sdk.exceptions", "airflow.exceptions"),
+        # AssetLineageInfo location changed within Airflow 3:
+        # 3.0-3.1: airflow.lineage.hook.AssetLineageInfo
+        # 3.2+:    airflow.sdk.lineage.AssetLineageInfo
+        "AssetLineageInfo": ("airflow.sdk.lineage", "airflow.lineage.hook"),
+    }
+)
 
 # Module map: module_name -> module_path(s)
 # For entire modules that have been moved (e.g., timezone)
@@ -336,7 +317,6 @@ _MODULE_MAP: dict[str, str | tuple[str, ...]] = {
 __getattr__ = create_module_getattr(
     import_map=_IMPORT_MAP,
     module_map=_MODULE_MAP,
-    rename_map=_RENAME_MAP,
 )
 
-__all__ = list(_RENAME_MAP.keys()) + list(_IMPORT_MAP.keys()) + list(_MODULE_MAP.keys())
+__all__ = list(_IMPORT_MAP.keys()) + list(_MODULE_MAP.keys())

@@ -23,17 +23,13 @@
 #
 from __future__ import annotations
 
-import packaging.version
-
-from airflow import __version__ as airflow_version
+from airflow.providers.common.sql.version_compat import get_base_airflow_version_tuple
 
 __all__ = ["__version__"]
 
 __version__ = "2.0.1"
 
-if packaging.version.parse(packaging.version.parse(airflow_version).base_version) < packaging.version.parse(
-    "2.11.0"
-):
+if get_base_airflow_version_tuple() < (2, 11, 0):
     raise RuntimeError(
         f"The package `apache-airflow-providers-common-sql:{__version__}` needs Apache Airflow 2.11.0+"
     )

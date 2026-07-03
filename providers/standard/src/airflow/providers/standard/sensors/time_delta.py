@@ -25,10 +25,9 @@ from typing import TYPE_CHECKING, Any
 from deprecated.classic import deprecated
 from packaging.version import Version
 
-from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.common.compat.sdk import AirflowSkipException, BaseSensorOperator, conf, timezone
+from airflow.sdk.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.standard.triggers.temporal import DateTimeTrigger, TimeDeltaTrigger
-from airflow.providers.standard.version_compat import AIRFLOW_V_3_0_PLUS
 
 if TYPE_CHECKING:
     from airflow.providers.common.compat.sdk import Context
@@ -82,9 +81,6 @@ class TimeDeltaSensor(BaseSensorOperator):
 
             return data_interval_end
 
-        if not data_interval_end and not AIRFLOW_V_3_0_PLUS:
-            raise ValueError("`data_interval_end` not found in task context.")
-
         dag_run = context.get("dag_run")
         if not dag_run:
             raise ValueError("`dag_run` not found in task context")
@@ -118,27 +114,16 @@ class TimeDeltaSensor(BaseSensorOperator):
             # If the target datetime is in the past, return immediately
             return True
         try:
-            if AIRFLOW_V_3_0_PLUS:
-                trigger = DateTimeTrigger(moment=target_dttm, end_from_trigger=self.end_from_trigger)
-            else:
-                trigger = DateTimeTrigger(moment=target_dttm)
+            trigger = DateTimeTrigger(moment=target_dttm, end_from_trigger=self.end_from_trigger)
         except (TypeError, ValueError) as e:
             if self.soft_fail:
                 raise AirflowSkipException("Skipping due to soft_fail is set to True.") from e
             raise
 
-        # todo: remove backcompat when min airflow version greater than 2.11
-        timeout: int | float | timedelta
-        if AIRFLOW_V_3_0_PLUS:
-            timeout = self.timeout
-        else:
-            # <=2.11 requires timedelta
-            timeout = timedelta(seconds=self.timeout)
-
         self.defer(
             trigger=trigger,
             method_name="execute_complete",
-            timeout=timeout,
+            timeout=self.timeout,
         )
 
     def execute_complete(self, context: Context, event: Any = None) -> None:
@@ -193,11 +178,7 @@ class WaitSensor(BaseSensorOperator):
     def execute(self, context: Context) -> None:
         if self.deferrable:
             self.defer(
-                trigger=(
-                    TimeDeltaTrigger(self.time_to_wait, end_from_trigger=True)
-                    if AIRFLOW_V_3_0_PLUS
-                    else TimeDeltaTrigger(self.time_to_wait)
-                ),
+                trigger=TimeDeltaTrigger(self.time_to_wait, end_from_trigger=True),
                 method_name="execute_complete",
             )
         else:

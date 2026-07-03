@@ -42,7 +42,7 @@ except ImportError:
     NoSuchModuleError = Exception  # type: ignore[misc,assignment]
 
 
-from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.sdk.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.common.compat.module_loading import import_string
 from airflow.providers.common.compat.sdk import (
     AirflowException,
@@ -91,7 +91,13 @@ def fetch_one_handler(cursor) -> tuple | None:
 
 
 def resolve_dialects() -> MutableMapping[str, MutableMapping]:
-    from airflow.providers_manager import ProvidersManager
+    from airflow.sdk._core_compat import require_core
+
+    # Dialect discovery across providers is owned by airflow-core's ProvidersManager;
+    # there is no Task-SDK/Execution-API equivalent. Import it lazily and guard it so
+    # this module stays importable on a core-less SDK-only install.
+    with require_core("Cross-provider SQL dialect discovery"):
+        from airflow.providers_manager import ProvidersManager  # noqa: PRV001
 
     providers_manager = ProvidersManager()
 
@@ -166,8 +172,20 @@ class DbApiHook(BaseHook):
     _test_connection_sql = "select 1"
     # Default SQL placeholder
     _placeholder: str = "%s"
-    _dialects: MutableMapping[str, MutableMapping] = resolve_dialects()
+    # Resolved lazily on first access (see the ``dialects`` property) rather than at
+    # class-definition time: ``resolve_dialects`` reaches into airflow-core's
+    # ProvidersManager, and pinning it here would drag core in at module import,
+    # breaking SDK-only installs.
+    _dialects: MutableMapping[str, MutableMapping] | None = None
     _resolve_target_fields = conf.getboolean("core", "dbapihook_resolve_target_fields", fallback=False)
+
+    @property
+    def dialects(self) -> MutableMapping[str, MutableMapping]:
+        """Mapping of dialect name to dialect info, resolved lazily via ProvidersManager."""
+        cls = type(self)
+        if cls._dialects is None:
+            cls._dialects = resolve_dialects()
+        return cls._dialects
 
     def __init__(self, *args, schema: str | None = None, log_sql: bool = True, **kwargs):
         super().__init__()
@@ -374,7 +392,7 @@ class DbApiHook(BaseHook):
     def dialect(self) -> Dialect:
         from airflow.providers.common.compat.module_loading import import_string
 
-        dialect_info = self._dialects.get(self.dialect_name)
+        dialect_info = self.dialects.get(self.dialect_name)
 
         self.log.debug("dialect_info: %s", dialect_info)
 

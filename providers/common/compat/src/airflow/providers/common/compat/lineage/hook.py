@@ -186,54 +186,6 @@ def _add_extra_polyfill(collector):
     return collector
 
 
-def _add_asset_naming_compatibility_layer(collector):
-    """
-    Handle AF 2.x compatibility for dataset -> asset terminology rename.
-
-    This is only called for AF 2.x where we need to provide asset-named methods
-    that wrap the underlying dataset methods.
-    """
-    from functools import wraps
-
-    from airflow.lineage.hook import DatasetLineageInfo, HookLineage
-
-    DatasetLineageInfo.asset = DatasetLineageInfo.dataset
-
-    def rename_asset_kwargs_to_dataset_kwargs(function):
-        @wraps(function)
-        def wrapper(*args, **kwargs):
-            if "asset_kwargs" in kwargs:
-                kwargs["dataset_kwargs"] = kwargs.pop("asset_kwargs")
-
-            if "asset_extra" in kwargs:
-                kwargs["dataset_extra"] = kwargs.pop("asset_extra")
-
-            return function(*args, **kwargs)
-
-        return wrapper
-
-    collector.create_asset = rename_asset_kwargs_to_dataset_kwargs(collector.create_dataset)
-    collector.add_input_asset = rename_asset_kwargs_to_dataset_kwargs(collector.add_input_dataset)
-    collector.add_output_asset = rename_asset_kwargs_to_dataset_kwargs(collector.add_output_dataset)
-
-    def _compat_collected_assets(self) -> HookLineage:
-        """Get the collected hook lineage information."""
-        lineage = self.collected_datasets
-        return HookLineage(
-            [
-                DatasetLineageInfo(dataset=item.dataset, count=item.count, context=item.context)
-                for item in lineage.inputs
-            ],
-            [
-                DatasetLineageInfo(dataset=item.dataset, count=item.count, context=item.context)
-                for item in lineage.outputs
-            ],
-        )
-
-    type(collector).collected_assets = property(_compat_collected_assets)
-    return collector
-
-
 def get_hook_lineage_collector():
     """
     Return a hook lineage collector with all required compatibility layers applied.
@@ -242,16 +194,12 @@ def get_hook_lineage_collector():
     properties (duck typing), rather than relying on the Airflow version number.
 
     Behavior by example:
-    Airflow 2: Collector is missing asset-based methods and `add_extra` - apply both layers.
-    Airflow 3.0–3.1: Collector has asset-based methods but lacks `add_extra` - apply single layer.
+    Airflow 3.0–3.1: Collector has asset-based methods but lacks `add_extra` - apply the polyfill.
     Airflow 3.2+: Collector has asset-based methods and `add_extra` support - no action required.
     """
     from airflow.providers.common.compat.sdk import get_hook_lineage_collector as get_global_collector
 
     global_collector = get_global_collector()
-
-    if _lacks_asset_methods(global_collector):
-        global_collector = _add_asset_naming_compatibility_layer(global_collector)
 
     if _lacks_add_extra_method(global_collector):
         global_collector = _add_extra_polyfill(global_collector)

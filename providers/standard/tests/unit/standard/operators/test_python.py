@@ -42,7 +42,12 @@ from unittest.mock import MagicMock
 import pytest
 from slugify import slugify
 
-from airflow.exceptions import AirflowProviderDeprecationWarning, DeserializingResultError
+from airflow.exceptions import AirflowProviderDeprecationWarning
+
+# The PythonVirtualenvOperator/ExternalPythonOperator now raise the Task-SDK
+# DeserializingResultError (airflow.sdk.exceptions) so the operator stays
+# importable without airflow-core. Assert against that same class.
+from airflow.sdk.exceptions import DeserializingResultError
 from airflow.models.connection import Connection
 from airflow.models.taskinstance import TaskInstance, clear_task_instances
 from airflow.providers.common.compat.sdk import AirflowException, BaseOperator

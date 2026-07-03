@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from methodtools import lru_cache
 
-from airflow.utils.log.logging_mixin import LoggingMixin
+from airflow.sdk.log import LoggingMixin
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Inspector

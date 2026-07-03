@@ -21,10 +21,10 @@ import datetime
 import warnings
 from typing import TYPE_CHECKING, Any
 
-from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.common.compat.sdk import BaseSensorOperator, conf, timezone
 from airflow.providers.standard.triggers.temporal import DateTimeTrigger
-from airflow.triggers.base import StartTriggerArgs
+from airflow.sdk.exceptions import AirflowProviderDeprecationWarning
+from airflow.sdk.triggers import StartTriggerArgs
 
 if TYPE_CHECKING:
     from airflow.sdk import Context

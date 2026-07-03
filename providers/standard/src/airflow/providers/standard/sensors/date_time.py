@@ -23,8 +23,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 from airflow.providers.common.compat.sdk import BaseSensorOperator, timezone
 from airflow.providers.standard.triggers.temporal import DateTimeTrigger
-from airflow.providers.standard.version_compat import AIRFLOW_V_3_0_PLUS
-from airflow.triggers.base import StartTriggerArgs
+from airflow.sdk.triggers import StartTriggerArgs
 
 if TYPE_CHECKING:
     from airflow.sdk import Context
@@ -136,9 +135,7 @@ class DateTimeSensorAsync(DateTimeSensor):
             trigger=DateTimeTrigger(
                 moment=self._moment,
                 end_from_trigger=self.end_from_trigger,
-            )
-            if AIRFLOW_V_3_0_PLUS
-            else DateTimeTrigger(moment=self._moment),
+            ),
         )
 
     def execute_complete(self, context: Context, event: Any = None) -> None:

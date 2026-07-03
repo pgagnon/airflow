@@ -23,17 +23,13 @@
 #
 from __future__ import annotations
 
-import packaging.version
-
-from airflow import __version__ as airflow_version
+from airflow.providers.standard.version_compat import get_base_airflow_version_tuple
 
 __all__ = ["__version__"]
 
 __version__ = "1.15.0"
 
-if packaging.version.parse(packaging.version.parse(airflow_version).base_version) < packaging.version.parse(
-    "2.11.0"
-):
+if get_base_airflow_version_tuple() < (2, 11, 0):
     raise RuntimeError(
         f"The package `apache-airflow-providers-standard:{__version__}` needs Apache Airflow 2.11.0+"
     )

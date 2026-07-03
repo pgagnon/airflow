@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from airflow import DAG
+from airflow.sdk import DAG
 from airflow.providers.standard.operators.bash import BashOperator
 
 with DAG(

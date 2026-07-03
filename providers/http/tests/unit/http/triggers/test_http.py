@@ -306,3 +306,42 @@ class TestHttpEventTrigger:
         assert kwargs["data"] == TEST_DATA
         assert kwargs["json"] is None
         assert kwargs["params"] is None
+
+
+class TestNoAirflow2DeadCode:
+    """Guard against reintroducing Airflow-2-only version branches (AF2 is EOL)."""
+
+    def _trigger_source(self):
+        import ast
+
+        import airflow.providers.http.triggers.http as mod
+
+        path = mod.__file__
+        return ast.parse(open(path).read(), filename=path)
+
+    def test_no_af2_version_branch(self):
+        import ast
+
+        tree = self._trigger_source()
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If):
+                test = node.test
+                name = None
+                if isinstance(test, ast.Name):
+                    name = test.id
+                elif (
+                    isinstance(test, ast.UnaryOp)
+                    and isinstance(test.op, ast.Not)
+                    and isinstance(test.operand, ast.Name)
+                ):
+                    name = test.operand.id
+                if name and name.startswith("AIRFLOW_V_"):
+                    offenders.append((node.lineno, name))
+        assert offenders == [], f"AF2 version branches still present: {offenders}"
+
+    def test_base_event_trigger_imported_unconditionally(self):
+        """BaseEventTrigger comes from one unconditional import, not a version-gated alias."""
+        from airflow.providers.http.triggers.http import BaseEventTrigger, BaseTrigger
+
+        assert issubclass(BaseEventTrigger, BaseTrigger)

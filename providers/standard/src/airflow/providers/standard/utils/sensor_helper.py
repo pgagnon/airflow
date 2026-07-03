@@ -21,17 +21,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import func, select, tuple_
 
-from airflow.models import DagRun, TaskInstance
-from airflow.models.serialized_dag import SerializedDagModel
-from airflow.providers.standard.version_compat import AIRFLOW_V_3_0_PLUS
-from airflow.utils.session import NEW_SESSION, provide_session
-
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
     from sqlalchemy.sql import Select
 
 
-@provide_session
 def _get_count(
     dttm_filter,
     external_task_ids,
@@ -39,10 +33,15 @@ def _get_count(
     external_dag_id,
     states,
     *,
-    session: Session = NEW_SESSION,
+    session: Session | None = None,
 ) -> int:
     """
     Get the count of records against dttm filter and states.
+
+    This backs the deprecated public ``ExternalTaskSensor.get_count`` API, which
+    queries the metadata DB directly. Direct ORM access requires airflow-core, so
+    the core imports are loaded lazily here (guarded by ``require_core``) rather
+    than at module import time - the rest of the provider stays core-free.
 
     :param dttm_filter: date time filter for logical date
     :param external_task_ids: The list of task_ids
@@ -51,6 +50,40 @@ def _get_count(
     :param states: task or dag states
     :param session: airflow session object
     """
+    from airflow.sdk._core_compat import require_core
+
+    with require_core("ExternalTaskSensor.get_count (direct metadata-DB access)"):
+        from airflow.models import DagRun, TaskInstance
+        from airflow.utils.session import provide_session
+
+    @provide_session
+    def _run(*, session: Session) -> int:
+        return _get_count_impl(
+            dttm_filter,
+            external_task_ids,
+            external_task_group_id,
+            external_dag_id,
+            states,
+            DagRun,
+            TaskInstance,
+            session,
+        )
+
+    if session is not None:
+        return _run(session=session)
+    return _run()
+
+
+def _get_count_impl(
+    dttm_filter,
+    external_task_ids,
+    external_task_group_id,
+    external_dag_id,
+    states,
+    DagRun,
+    TaskInstance,
+    session: Session,
+) -> int:
     TI = TaskInstance
     DR = DagRun
     if not dttm_filter:
@@ -98,10 +131,8 @@ def _count_stmt(
     :param dttm_filter: date time filter for logical date
     :param external_dag_id: The ID of the external DAG.
     """
-    date_field = model.logical_date if AIRFLOW_V_3_0_PLUS else model.execution_date
-
     return select(func.count()).where(
-        model.dag_id == external_dag_id, model.state.in_(states), date_field.in_(dttm_filter)
+        model.dag_id == external_dag_id, model.state.in_(states), model.logical_date.in_(dttm_filter)
     )
 
 
@@ -111,24 +142,33 @@ def _get_external_task_group_task_ids(
     """
     Get the count of records against dttm filter and states.
 
+    This backs the deprecated public ``ExternalTaskSensor.get_external_task_group_task_ids``
+    API. It reads the serialized DAG from the metadata DB, which requires
+    airflow-core, so the ORM imports are loaded lazily (guarded by ``require_core``)
+    instead of at module import time.
+
     :param dttm_filter: date time filter for logical date
     :param external_task_group_id: The ID of the external task group
     :param external_dag_id: The ID of the external DAG.
     :param session: airflow session object
     """
+    from airflow.sdk._core_compat import require_core
+
+    with require_core("ExternalTaskSensor.get_external_task_group_task_ids (serialized-DAG metadata access)"):
+        from airflow.models import TaskInstance
+        from airflow.models.serialized_dag import SerializedDagModel
+
     refreshed_dag_info = SerializedDagModel.get_dag(external_dag_id, session=session)
     if not refreshed_dag_info:
         return [(external_task_group_id, -1)]
     task_group = refreshed_dag_info.task_group_dict.get(external_task_group_id)
 
     if task_group:
-        date_field = TaskInstance.logical_date if AIRFLOW_V_3_0_PLUS else TaskInstance.execution_date
-
         group_tasks = session.scalars(
             select(TaskInstance).filter(
                 TaskInstance.dag_id == external_dag_id,
                 TaskInstance.task_id.in_(task.task_id for task in task_group),
-                date_field.in_(dttm_filter),
+                TaskInstance.logical_date.in_(dttm_filter),
             )
         )
 

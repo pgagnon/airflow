@@ -59,7 +59,7 @@ requires-python = ">=3.10"
 # Make sure to run ``prek update-providers-dependencies --all-files``
 # After you modify the dependencies, and rebuild your Breeze CI image with ``breeze ci-image build``
 dependencies = [
-    "apache-airflow>=2.11.0",
+    "apache-airflow-task-sdk>=1.0.0",
     "asgiref>=2.3.0; python_version < '3.14'",
     "asgiref>=3.11.1; python_version >= '3.14'",
 ]
@@ -67,6 +67,13 @@ dependencies = [
 # The optional dependencies should be modified in place in the generated file
 # Any change in the dependencies is preserved when the file is regenerated
 [project.optional-dependencies]
+# Optional, NOT a hard dependency: the asset-compat surface
+# (``assets.AssetDetails`` / ``AssetAliasDetails`` / ``expand_alias_to_assets``)
+# resolves lazily against airflow-core when accessed. The provider imports
+# without core; install this extra only if you use those attributes.
+"core" = [
+    "apache-airflow-core>=3.0.0"
+]
 "openlineage" = [
     "apache-airflow-providers-openlineage"
 ]

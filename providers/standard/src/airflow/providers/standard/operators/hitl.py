@@ -19,8 +19,8 @@ from __future__ import annotations
 import logging
 import warnings
 
-from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException
+from airflow.sdk.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.standard.version_compat import (
     AIRFLOW_V_3_1_3_PLUS,
     AIRFLOW_V_3_1_PLUS,

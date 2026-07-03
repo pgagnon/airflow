@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from airflow.providers.common.compat.sdk import AirflowException, BaseHook
 from airflow.providers.common.compat.version_compat import AIRFLOW_V_3_2_PLUS
 from airflow.providers.common.sql.hooks.sql import DbApiHook
-from airflow.triggers.base import BaseTrigger, TriggerEvent
+from airflow.sdk.triggers import BaseTrigger, TriggerEvent
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

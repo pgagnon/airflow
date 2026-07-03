@@ -35,56 +35,36 @@ from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 def collector():
     from airflow.providers.common.compat.sdk import HookLineageCollector
 
-    from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_2_PLUS
+    from tests_common.test_utils.version_compat import AIRFLOW_V_3_2_PLUS
 
     hlc = HookLineageCollector()
 
-    if AIRFLOW_V_3_0_PLUS:
-        from unittest import mock
+    patch_target = "airflow.lineage.hook.get_hook_lineage_collector"
+    if AIRFLOW_V_3_2_PLUS:
+        patch_target = "airflow.sdk.lineage.get_hook_lineage_collector"
 
-        patch_target = "airflow.lineage.hook.get_hook_lineage_collector"
-        if AIRFLOW_V_3_2_PLUS:
-            patch_target = "airflow.sdk.lineage.get_hook_lineage_collector"
-
-        with mock.patch(patch_target, return_value=hlc):
-            from airflow.providers.common.compat.lineage.hook import get_hook_lineage_collector
-
-            yield get_hook_lineage_collector()
-    else:
-        from airflow.lineage import hook
+    with mock.patch(patch_target, return_value=hlc):
         from airflow.providers.common.compat.lineage.hook import get_hook_lineage_collector
 
-        hook._hook_lineage_collector = hlc
         yield get_hook_lineage_collector()
-        hook._hook_lineage_collector = None
 
 
 @pytest.fixture
 def noop_collector():
     from airflow.providers.common.compat.sdk import NoOpCollector
 
-    from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_2_PLUS
+    from tests_common.test_utils.version_compat import AIRFLOW_V_3_2_PLUS
 
     noop = NoOpCollector()
 
-    if AIRFLOW_V_3_0_PLUS:
-        from unittest import mock
+    patch_target = "airflow.lineage.hook.get_hook_lineage_collector"
+    if AIRFLOW_V_3_2_PLUS:
+        patch_target = "airflow.sdk.lineage.get_hook_lineage_collector"
 
-        patch_target = "airflow.lineage.hook.get_hook_lineage_collector"
-        if AIRFLOW_V_3_2_PLUS:
-            patch_target = "airflow.sdk.lineage.get_hook_lineage_collector"
-
-        with mock.patch(patch_target, return_value=noop):
-            from airflow.providers.common.compat.lineage.hook import get_hook_lineage_collector
-
-            yield get_hook_lineage_collector()
-    else:
-        from airflow.lineage import hook
+    with mock.patch(patch_target, return_value=noop):
         from airflow.providers.common.compat.lineage.hook import get_hook_lineage_collector
 
-        hook._hook_lineage_collector = noop
         yield get_hook_lineage_collector()
-        hook._hook_lineage_collector = None
 
 
 @pytest.fixture(params=["collector", "noop_collector"])
@@ -194,21 +174,6 @@ def test_empty_collector(any_collector):
     assert lineage.extra == []
 
 
-@pytest.mark.skipif(AIRFLOW_V_3_0_PLUS, reason="Test requires Airflow < 3.0")
-def test_af2_collector_has_dataset_methods(any_collector):
-    """Test that AF 2.x also has dataset methods."""
-
-    assert hasattr(any_collector, "add_input_dataset")
-    assert hasattr(any_collector, "add_output_dataset")
-    assert hasattr(any_collector, "collected_datasets")
-    assert hasattr(any_collector, "create_dataset")
-
-    assert callable(any_collector.add_input_dataset)
-    assert callable(any_collector.add_output_dataset)
-    assert callable(any_collector.create_dataset)
-
-
-@pytest.mark.skipif(not AIRFLOW_V_3_0_PLUS, reason="Test requires Airflow 3.0+")
 def test_af3_collector_do_not_have_dataset_methods(any_collector):
     with pytest.raises(AttributeError):
         any_collector.add_input_dataset
@@ -588,31 +553,6 @@ class TestCollectorAddAssets:
         lineage = collector.collected_assets
         assert len(lineage.inputs) == expected_number
         assert len(lineage.outputs) == expected_number
-
-    @pytest.mark.skipif(AIRFLOW_V_3_0_PLUS, reason="Test requires < Airflow 3.0")
-    def test_add_asset_max_limit_af2(self, collector):
-        """Test that asset operations do not respect maximum limit."""
-        mock_context = mock.MagicMock()
-        max_limit = 100
-        added_assets = max_limit + 50
-
-        # Limitation on collected assets was added in AF3 #45798
-        expected_number = added_assets
-
-        # Add more than max allowed inputs
-        for i in range(added_assets):
-            collector.add_input_asset(mock_context, uri=f"s3://bucket/input-{i}")
-
-        # Add more than max allowed outputs
-        for i in range(added_assets):
-            collector.add_output_asset(mock_context, uri=f"s3://bucket/output-{i}")
-
-        assert collector.has_collected
-
-        lineage = collector.collected_assets
-        assert len(lineage.inputs) == expected_number
-        assert len(lineage.outputs) == expected_number
-
 
 class TestEdgeCases:
     """Test edge cases and error conditions to ensure collector never fails."""

@@ -36,13 +36,13 @@ from tenacity import retry_if_exception
 
 from airflow.providers.common.compat.sdk import AirflowException, BaseHook
 from airflow.providers.http.exceptions import HttpErrorException, HttpMethodException
-from airflow.utils.log.logging_mixin import LoggingMixin
+from airflow.sdk.log import LoggingMixin
 
 if TYPE_CHECKING:
     from aiohttp.client_reqrep import ClientResponse
     from requests.adapters import HTTPAdapter
 
-    from airflow.models import Connection
+    from airflow.sdk import Connection
 
 
 def _url_from_endpoint(base_url: str | None, endpoint: str | None) -> str:

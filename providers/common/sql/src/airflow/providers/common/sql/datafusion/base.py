@@ -19,7 +19,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from airflow.utils.log.logging_mixin import LoggingMixin
+from airflow.sdk.log import LoggingMixin
 
 if TYPE_CHECKING:
     from datafusion import SessionContext

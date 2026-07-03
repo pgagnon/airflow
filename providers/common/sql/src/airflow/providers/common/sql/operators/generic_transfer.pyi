@@ -36,7 +36,7 @@ from typing import Any, ClassVar
 import jinja2
 from _typeshed import Incomplete as Incomplete
 
-from airflow.models import BaseOperator
+from airflow.sdk import BaseOperator
 from airflow.providers.common.sql.hooks.sql import DbApiHook as DbApiHook
 from airflow.sdk import Context
 

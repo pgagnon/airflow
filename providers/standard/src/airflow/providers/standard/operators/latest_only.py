@@ -26,8 +26,8 @@ from typing import TYPE_CHECKING
 import pendulum
 
 from airflow.providers.common.compat.sdk import BaseBranchOperator
-from airflow.providers.standard.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_2_PLUS
-from airflow.utils.types import DagRunType
+from airflow.providers.standard.version_compat import AIRFLOW_V_3_2_PLUS
+from airflow.sdk import DagRunType
 
 if TYPE_CHECKING:
     from pendulum.datetime import DateTime
@@ -98,10 +98,7 @@ class LatestOnlyOperator(BaseBranchOperator):
 
     def _get_compare_dates(self, dag_run: DagRun) -> tuple[DateTime, DateTime] | None:
         dagrun_date: DateTime
-        if AIRFLOW_V_3_0_PLUS:
-            dagrun_date = dag_run.logical_date or dag_run.run_after  # type: ignore[assignment]
-        else:
-            dagrun_date = dag_run.logical_date  # type: ignore[assignment]
+        dagrun_date = dag_run.logical_date or dag_run.run_after  # type: ignore[assignment]
 
         from airflow.timetables.base import DataInterval, TimeRestriction
 

@@ -41,8 +41,7 @@ from pandas import DataFrame as PandasDataFrame
 from polars import DataFrame as PolarsDataFrame
 from sqlalchemy.engine import URL as URL, Engine as Engine, Inspector as Inspector
 
-from airflow.hooks.base import BaseHook as BaseHook
-from airflow.models import Connection as Connection
+from airflow.sdk import BaseHook as BaseHook, Connection as Connection
 from airflow.providers.common.sql.dialects.dialect import Dialect as Dialect
 from airflow.providers.openlineage.extractors import OperatorLineage as OperatorLineage
 from airflow.providers.openlineage.sqlparser import DatabaseInfo as DatabaseInfo

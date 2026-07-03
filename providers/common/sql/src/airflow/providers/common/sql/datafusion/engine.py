@@ -28,7 +28,7 @@ from airflow.providers.common.sql.datafusion.exceptions import (
 )
 from airflow.providers.common.sql.datafusion.format_handlers import get_format_handler
 from airflow.providers.common.sql.datafusion.object_storage_provider import get_object_storage_provider
-from airflow.utils.log.logging_mixin import LoggingMixin
+from airflow.sdk.log import LoggingMixin
 
 
 class DataFusionEngine(LoggingMixin):

@@ -39,7 +39,7 @@ from airflow.sdk.execution_time.hitl import (
     update_hitl_detail_response,
 )
 from airflow.sdk.timezone import utcnow
-from airflow.triggers.base import BaseTrigger, TriggerEvent
+from airflow.sdk.triggers import BaseTrigger, TriggerEvent
 
 
 class HITLTriggerEventSuccessPayload(TypedDict, total=False):

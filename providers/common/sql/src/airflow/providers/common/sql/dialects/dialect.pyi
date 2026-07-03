@@ -38,7 +38,7 @@ from typing import Any, TypeVar
 from _typeshed import Incomplete as Incomplete
 from sqlalchemy.engine import Inspector as Inspector
 
-from airflow.utils.log.logging_mixin import LoggingMixin as LoggingMixin
+from airflow.sdk.log import LoggingMixin as LoggingMixin
 
 T = TypeVar("T")
 

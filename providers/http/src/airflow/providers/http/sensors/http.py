@@ -124,7 +124,7 @@ class HttpSensor(BaseSensorOperator):
         self.request_kwargs = request_kwargs or {}
 
     def poke(self, context: Context) -> bool | PokeReturnValue:
-        from airflow.utils.operator_helpers import determine_kwargs
+        from airflow.sdk.bases.decorator import determine_kwargs
 
         hook = HttpHook(
             method=self.method,

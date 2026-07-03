@@ -17,31 +17,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from airflow.providers.common.compat.version_compat import (
-    AIRFLOW_V_3_0_PLUS,
-)
+from airflow.sdk.definitions.asset import Asset, AssetAlias, AssetAll, AssetAny
 
 if TYPE_CHECKING:
-    from airflow.api_fastapi.auth.managers.models.resource_details import AssetAliasDetails, AssetDetails
-    from airflow.models.asset import expand_alias_to_assets
-    from airflow.sdk.definitions.asset import Asset, AssetAlias, AssetAll, AssetAny
-else:
-    if AIRFLOW_V_3_0_PLUS:
-        from airflow.api_fastapi.auth.managers.models.resource_details import AssetAliasDetails, AssetDetails
-        from airflow.models.asset import expand_alias_to_assets
-        from airflow.sdk.definitions.asset import Asset, AssetAlias, AssetAll, AssetAny
-    else:
-        # dataset is renamed to asset since Airflow 3.0
-        from airflow.auth.managers.models.resource_details import DatasetDetails as AssetDetails
-        from airflow.datasets import (
-            Dataset as Asset,
-            DatasetAlias as AssetAlias,
-            DatasetAll as AssetAll,
-            DatasetAny as AssetAny,
-            expand_alias_to_datasets as expand_alias_to_assets,
-        )
+    # These live only in airflow-core; annotations are import-time-free.
+    from airflow.api_fastapi.auth.managers.models.resource_details import (
+        AssetAliasDetails as AssetAliasDetails,
+        AssetDetails as AssetDetails,
+    )
+    from airflow.models.asset import expand_alias_to_assets as expand_alias_to_assets
 
 
 __all__ = [
@@ -53,3 +39,27 @@ __all__ = [
     "AssetDetails",
     "expand_alias_to_assets",
 ]
+
+# ``AssetDetails``/``AssetAliasDetails`` (auth-manager resource details) and
+# ``expand_alias_to_assets`` (asset DB query) are airflow-core-only with no Task
+# SDK equivalent. Resolving them lazily keeps this module import core-free for
+# SDK-only installs while preserving the AF3.0 asset-compat surface: only
+# *accessing* one of these names pulls airflow-core.
+_CORE_ONLY = {
+    "AssetAliasDetails": "airflow.api_fastapi.auth.managers.models.resource_details",
+    "AssetDetails": "airflow.api_fastapi.auth.managers.models.resource_details",
+    "expand_alias_to_assets": "airflow.models.asset",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module_path = _CORE_ONLY.get(name)
+    if module_path is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    from airflow.sdk._core_compat import require_core
+
+    with require_core(f"common.compat asset attribute {name!r}"):
+        module = importlib.import_module(module_path)
+    return getattr(module, name)

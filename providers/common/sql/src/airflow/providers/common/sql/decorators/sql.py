@@ -21,7 +21,6 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from airflow.providers.common.compat.sdk import (
-    AIRFLOW_V_3_0_PLUS,
     DecoratedOperator,
     TaskDecorator,
     context_merge,
@@ -29,12 +28,7 @@ from airflow.providers.common.compat.sdk import (
     task_decorator_factory,
 )
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
-
-if AIRFLOW_V_3_0_PLUS:
-    from airflow.sdk.definitions._internal.types import SET_DURING_EXECUTION
-else:
-    from airflow.utils.types import NOTSET as SET_DURING_EXECUTION  # type: ignore[attr-defined,no-redef]
-
+from airflow.sdk.definitions._internal.types import SET_DURING_EXECUTION
 
 if TYPE_CHECKING:
     from airflow.providers.common.compat.sdk import Context

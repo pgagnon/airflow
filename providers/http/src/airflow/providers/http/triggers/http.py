@@ -32,14 +32,8 @@ from requests.cookies import RequestsCookieJar
 from requests.structures import CaseInsensitiveDict
 
 from airflow.providers.common.compat.sdk import AirflowException
-from airflow.providers.common.compat.version_compat import AIRFLOW_V_3_0_PLUS
 from airflow.providers.http.hooks.http import HttpAsyncHook
-from airflow.triggers.base import BaseTrigger, TriggerEvent
-
-if AIRFLOW_V_3_0_PLUS:
-    from airflow.triggers.base import BaseEventTrigger
-else:
-    from airflow.triggers.base import BaseTrigger as BaseEventTrigger  # type: ignore
+from airflow.sdk.triggers import BaseEventTrigger, BaseTrigger, TriggerEvent
 
 if TYPE_CHECKING:
     from aiohttp.client_reqrep import ClientResponse

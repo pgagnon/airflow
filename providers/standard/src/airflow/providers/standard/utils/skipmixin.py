@@ -22,7 +22,7 @@ from types import GeneratorType
 from typing import TYPE_CHECKING
 
 from airflow.providers.common.compat.sdk import AirflowException
-from airflow.utils.log.logging_mixin import LoggingMixin
+from airflow.sdk.log import LoggingMixin
 
 if TYPE_CHECKING:
     from airflow.sdk.definitions._internal.node import DAGNode

@@ -33,7 +33,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from airflow.providers.common.sql.hooks.sql import DbApiHook as DbApiHook
-from airflow.triggers.base import BaseTrigger as BaseTrigger, TriggerEvent as TriggerEvent
+from airflow.sdk.triggers import BaseTrigger as BaseTrigger, TriggerEvent as TriggerEvent
 
 class SQLExecuteQueryTrigger(BaseTrigger):
     def __init__(

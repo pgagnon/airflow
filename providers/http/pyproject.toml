@@ -59,7 +59,7 @@ requires-python = ">=3.10"
 # Make sure to run ``prek update-providers-dependencies --all-files``
 # After you modify the dependencies, and rebuild your Breeze CI image with ``breeze ci-image build``
 dependencies = [
-    "apache-airflow>=2.11.0",
+    "apache-airflow-task-sdk>=1.0.0",
     "apache-airflow-providers-common-compat>=1.12.0",
     # The 2.26.0 release of requests got rid of the chardet LGPL mandatory dependency, allowing us to
     # release it as a requirement for airflow

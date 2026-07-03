@@ -17,16 +17,6 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-from airflow.providers.common.compat.version_compat import AIRFLOW_V_3_0_PLUS
-
-if TYPE_CHECKING:
-    from airflow.sdk.bases.notifier import BaseNotifier
-elif AIRFLOW_V_3_0_PLUS:
-    from airflow.sdk.bases.notifier import BaseNotifier
-else:
-    from airflow.notifications.basenotifier import BaseNotifier
-
+from airflow.sdk.bases.notifier import BaseNotifier
 
 __all__ = ["BaseNotifier"]

@@ -16,34 +16,16 @@
 # under the License.
 from __future__ import annotations
 
-try:
-    from airflow.utils.module_loading import (
-        import_string,
-        iter_namespace,
-        qualname,
-    )
-
-except ImportError:
-    from airflow.sdk.module_loading import import_string, iter_namespace, qualname
-
-try:
-    # This function was not available in Airflow 3.0/3.1 in module_loading, but it's good to keep it in the
-    # same shared module - good for reuse
-    from airflow.sdk._shared.module_loading import is_valid_dotpath
-
-except ImportError:
-    # TODO: Remove it when Airflow 3.2.0 is the minimum version
-    def is_valid_dotpath(path: str) -> bool:
-        import re
-
-        if not isinstance(path, str):
-            return False
-        pattern = r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$"
-        return bool(re.match(pattern, path))
-
+from airflow.sdk.module_loading import (  # noqa: F401
+    import_string,
+    is_valid_dotpath,
+    iter_namespace,
+    qualname,
+)
 
 __all__ = [
     "import_string",
+    "is_valid_dotpath",
     "qualname",
     "iter_namespace",
 ]

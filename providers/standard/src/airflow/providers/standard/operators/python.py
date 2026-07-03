@@ -42,18 +42,13 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier
 from packaging.version import InvalidVersion, Version
 
-from airflow.exceptions import (
-    AirflowConfigException,
-    AirflowProviderDeprecationWarning,
-    DeserializingResultError,
-)
-from airflow.models.variable import Variable
 from airflow.providers.common.compat.sdk import (
     AirflowException,
     AirflowSkipException,
     BaseBranchOperator,
     KeywordParameters,
     SkipMixin,
+    Variable,
     context_merge,
 )
 from airflow.providers.common.compat.standard.operators import (
@@ -67,19 +62,51 @@ from airflow.providers.standard.utils.python_virtualenv import (
     write_python_script,
 )
 from airflow.providers.standard.version_compat import (
-    AIRFLOW_V_3_0_PLUS,
     AIRFLOW_V_3_2_PLUS,
     AIRFLOW_V_3_3_PLUS,
 )
-from airflow.utils import hashlib_wrapper
-from airflow.utils.file import get_unique_dag_module_name
+from airflow.sdk.exceptions import (
+    AirflowConfigException,
+    AirflowProviderDeprecationWarning,
+    DeserializingResultError,
+)
 
 log = logging.getLogger(__name__)
 
+# Module-name template for a DAG file rendered into a unique import name. Mirrors
+# airflow-core's ``airflow.utils.file.MODIFIED_DAG_MODULE_NAME`` so the SDK-only
+# provider doesn't import airflow-core for this trivial string formatting.
+_MODIFIED_DAG_MODULE_NAME = "unusual_prefix_{path_hash}_{module_name}"
+
+
+def _md5(data: bytes):
+    """``hashlib.md5`` with ``usedforsecurity=False`` (this is a cache key, not a secret).
+
+    Inlined from airflow-core's ``airflow.utils.hashlib_wrapper.md5`` so importing
+    this operator doesn't pull airflow-core.
+    """
+    import hashlib
+
+    return hashlib.md5(data, usedforsecurity=False)
+
+
+def _get_unique_dag_module_name(file_path: str) -> str:
+    """Return a unique module name for a DAG file path.
+
+    Inlined from airflow-core's ``airflow.utils.file.get_unique_dag_module_name``
+    to keep this module importable without airflow-core.
+    """
+    import hashlib
+
+    if isinstance(file_path, str):
+        path_hash = hashlib.sha1(file_path.encode("utf-8"), usedforsecurity=False).hexdigest()
+        org_mod_name = re.sub(r"[.-]", "_", Path(file_path).stem)
+        return _MODIFIED_DAG_MODULE_NAME.format(path_hash=path_hash, module_name=org_mod_name)
+    raise ValueError("file_path should be a string to generate unique module name")
+
+
 if TYPE_CHECKING:
     from typing import Literal
-
-    from pendulum.datetime import DateTime
 
     from airflow.providers.common.compat.sdk import Context
     from airflow.sdk.execution_time.callback_runner import (
@@ -216,15 +243,10 @@ class PythonOperator(BaseAsyncOperator):
         # This needs to be lazy because subclasses may implement execute_callable
         # by running a separate process that can't use the eager result.
         def __prepare_execution() -> tuple[ExecutionCallableRunner, OutletEventAccessorsProtocol] | None:
-            if AIRFLOW_V_3_0_PLUS:
-                from airflow.sdk.execution_time.callback_runner import create_executable_runner
-                from airflow.sdk.execution_time.context import context_get_outlet_events
+            from airflow.sdk.execution_time.callback_runner import create_executable_runner
+            from airflow.sdk.execution_time.context import context_get_outlet_events
 
-                return create_executable_runner, context_get_outlet_events(context)
-            from airflow.utils.context import context_get_outlet_events  # type: ignore
-            from airflow.utils.operator_helpers import ExecutionCallableRunner  # type: ignore
-
-            return ExecutionCallableRunner, context_get_outlet_events(context)
+            return create_executable_runner, context_get_outlet_events(context)
 
         self.__prepare_execution = __prepare_execution
 
@@ -357,8 +379,6 @@ class ShortCircuitOperator(PythonOperator, SkipMixin):
             self.log.info("No downstream tasks; nothing to do.")
             return condition
 
-        dag_run = context["dag_run"]
-
         def get_tasks_to_skip():
             if self.ignore_downstream_trigger_rules is True:
                 tasks = context["task"].get_flat_relatives(upstream=False)
@@ -375,19 +395,10 @@ class ShortCircuitOperator(PythonOperator, SkipMixin):
             self.log.debug("Downstream task IDs %s", to_skip := list(get_tasks_to_skip()))
 
         self.log.info("Skipping downstream tasks")
-        if AIRFLOW_V_3_0_PLUS:
-            self.skip(
-                ti=context["ti"],
-                tasks=to_skip,
-            )
-        else:
-            if to_skip:
-                self.skip(
-                    dag_run=context["dag_run"],
-                    tasks=to_skip,
-                    execution_date=cast("DateTime", dag_run.logical_date),  # type: ignore[call-arg]
-                    map_index=context["ti"].map_index,
-                )
+        self.skip(
+            ti=context["ti"],
+            tasks=to_skip,
+        )
 
         self.log.info("Done.")
         # returns the result of the super execute method as it is instead of returning None
@@ -450,9 +461,8 @@ class _BasePythonVirtualenvOperator(PythonOperator, metaclass=ABCMeta):
         "tomorrow_ds_nodash",
         "yesterday_ds",
         "yesterday_ds_nodash",
+        "task_reschedule_count",
     }
-    if AIRFLOW_V_3_0_PLUS:
-        BASE_SERIALIZABLE_CONTEXT_KEYS.add("task_reschedule_count")
     if AIRFLOW_V_3_3_PLUS:
         BASE_SERIALIZABLE_CONTEXT_KEYS.add("partition_key")
 
@@ -559,9 +569,6 @@ class _BasePythonVirtualenvOperator(PythonOperator, metaclass=ABCMeta):
         :param context: The task execution context
         :return: Path to the bundle root directory, or None if not in a bundle
         """
-        if not AIRFLOW_V_3_0_PLUS:
-            return None
-
         # In Airflow 3.x, the RuntimeTaskInstance has a bundle_instance attribute
         # that contains the bundle information including its path
         ti = context["ti"]
@@ -655,7 +662,7 @@ class _BasePythonVirtualenvOperator(PythonOperator, metaclass=ABCMeta):
             }
 
             if inspect.getfile(self.python_callable) == self.dag.fileloc:
-                jinja_context["modified_dag_module_name"] = get_unique_dag_module_name(self.dag.fileloc)
+                jinja_context["modified_dag_module_name"] = _get_unique_dag_module_name(self.dag.fileloc)
 
             write_python_script(
                 jinja_context=jinja_context,
@@ -714,9 +721,7 @@ class _BasePythonVirtualenvOperator(PythonOperator, metaclass=ABCMeta):
 
     def determine_kwargs(self, context: Mapping[str, Any]) -> Mapping[str, Any]:
         keyword_params = KeywordParameters.determine(self.python_callable, self.op_args, context)
-        if AIRFLOW_V_3_0_PLUS:
-            return keyword_params.unpacking()
-        return keyword_params.serializing()  # type: ignore[attr-defined]
+        return keyword_params.unpacking()
 
 
 def _pendulum_to_native_datetime(obj):
@@ -961,7 +966,7 @@ class PythonVirtualenvOperator(_BasePythonVirtualenvOperator):
             "system_site_packages": self.system_site_packages,
         }
         hash_text = json.dumps(hash_dict, sort_keys=True)
-        hash_object = hashlib_wrapper.md5(hash_text.encode())
+        hash_object = _md5(hash_text.encode())
         requirements_hash = hash_object.hexdigest()
         return requirements_hash[:8], hash_text
 
@@ -1399,27 +1404,13 @@ def get_current_context() -> Mapping[str, Any]:
     Current context will only have value if this method was called after an operator
     was starting to execute.
     """
-    if AIRFLOW_V_3_0_PLUS:
-        warnings.warn(
-            "Using get_current_context from standard provider is deprecated and will be removed."
-            "Please import `from airflow.sdk import get_current_context` and use it instead.",
-            AirflowProviderDeprecationWarning,
-            stacklevel=2,
-        )
+    warnings.warn(
+        "Using get_current_context from standard provider is deprecated and will be removed."
+        "Please import `from airflow.sdk import get_current_context` and use it instead.",
+        AirflowProviderDeprecationWarning,
+        stacklevel=2,
+    )
 
-        from airflow.sdk import get_current_context
+    from airflow.sdk import get_current_context
 
-        return get_current_context()
-    return _get_current_context()
-
-
-def _get_current_context() -> Mapping[str, Any]:
-    # Airflow 2.x
-    # TODO: To be removed when Airflow 2 support is dropped
-    from airflow.models.taskinstance import _CURRENT_CONTEXT  # type: ignore[attr-defined]
-
-    if not _CURRENT_CONTEXT:
-        raise RuntimeError(
-            "Current context was requested but no context was found! Are you running within an Airflow task?"
-        )
-    return _CURRENT_CONTEXT[-1]
+    return get_current_context()

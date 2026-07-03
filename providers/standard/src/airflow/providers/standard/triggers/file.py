@@ -26,16 +26,7 @@ from typing import Any
 
 import anyio
 
-from airflow.providers.standard.version_compat import AIRFLOW_V_3_0_PLUS
-
-if AIRFLOW_V_3_0_PLUS:
-    from airflow.triggers.base import BaseEventTrigger, BaseTrigger, TriggerEvent
-else:
-    from airflow.triggers.base import (  # type: ignore
-        BaseTrigger,
-        BaseTrigger as BaseEventTrigger,
-        TriggerEvent,
-    )
+from airflow.sdk.triggers import BaseEventTrigger, BaseTrigger, TriggerEvent
 
 log = logging.getLogger(__name__)
 

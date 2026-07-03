@@ -25,15 +25,32 @@ from __future__ import annotations
 
 import packaging.version
 
-from airflow import __version__ as airflow_version
-
 __all__ = ["__version__"]
 
 __version__ = "1.15.0"
 
-if packaging.version.parse(packaging.version.parse(airflow_version).base_version) < packaging.version.parse(
-    "2.11.0"
-):
+
+def _get_airflow_version() -> str:
+    """Resolve the base Airflow version without importing airflow-core.
+
+    ``airflow.__version__`` only exists when ``apache-airflow-core`` is
+    installed; in a Task-SDK-only install the ``airflow`` namespace is the SDK's
+    pkgutil shim. Read the distribution metadata instead, preferring core when
+    present and deriving the equivalent base version from the SDK otherwise.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("apache-airflow-core")
+    except PackageNotFoundError:
+        # SDK-only: SDK minor/micro track Airflow's; SDK major is two behind.
+        sdk = packaging.version.parse(version("apache-airflow-task-sdk"))
+        return f"{sdk.major + 2}.{sdk.minor}.{sdk.micro}"
+
+
+if packaging.version.parse(
+    packaging.version.parse(_get_airflow_version()).base_version
+) < packaging.version.parse("2.11.0"):
     raise RuntimeError(
         f"The package `apache-airflow-providers-common-compat:{__version__}` needs Apache Airflow 2.11.0+"
     )

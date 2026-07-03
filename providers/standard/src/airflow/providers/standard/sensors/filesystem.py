@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator, conf
 from airflow.providers.standard.hooks.filesystem import FSHook
 from airflow.providers.standard.triggers.file import FileTrigger
-from airflow.triggers.base import StartTriggerArgs
+from airflow.sdk.triggers import StartTriggerArgs
 
 if TYPE_CHECKING:
     from airflow.sdk import Context

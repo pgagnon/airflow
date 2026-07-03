@@ -16,7 +16,7 @@
 # under the License.
 from __future__ import annotations
 
-from airflow import DAG
+from airflow.sdk import DAG
 from airflow.providers.common.compat.sdk import timezone
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
