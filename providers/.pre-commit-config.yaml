@@ -262,3 +262,10 @@ repos:
         types: [python]
         files: ^.*/src/airflow/providers/.*\.py$
         require_serial: true
+      - id: check-core-imports-in-providers
+        name: Check for module-level airflow-core imports in opted-in providers
+        entry: ../scripts/ci/prek/check_core_imports_in_providers.py
+        language: python
+        types: [python]
+        files: ^.*/src/airflow/providers/.*\.py$
+        require_serial: false
