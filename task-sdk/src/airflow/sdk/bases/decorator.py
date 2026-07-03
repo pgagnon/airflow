@@ -67,6 +67,9 @@ if TYPE_CHECKING:
     from airflow.sdk.definitions.taskgroup import TaskGroup
 
 
+R = TypeVar("R")
+
+
 class ExpandableFactory(Protocol):
     """
     Protocol providing inspection against wrapped function.
@@ -251,6 +254,23 @@ def determine_kwargs(
     :return: A dictionary which contains the keyword arguments that are compatible with the callable.
     """
     return KeywordParameters.determine(func, args, kwargs).unpacking()
+
+
+def make_kwargs_callable(func: Callable[..., R]) -> Callable[..., R]:
+    """
+    Create a new callable that only forwards necessary arguments from any provided input.
+
+    Make a new callable that can accept any number of positional or keyword arguments
+    but only forwards those required by the given callable func.
+    """
+    import functools
+
+    @functools.wraps(func)
+    def kwargs_func(*args, **kwargs):
+        kwargs = determine_kwargs(func, args, kwargs)
+        return func(*args, **kwargs)
+
+    return kwargs_func
 
 
 class DecoratedOperator(BaseOperator):

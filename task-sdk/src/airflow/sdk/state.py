@@ -23,3 +23,134 @@ from airflow.sdk._shared.state import (
     BaseStoreBackend as BaseStoreBackend,
     TaskScope as TaskScope,
 )
+
+# Re-export the run/task state enums under a stable public path. Providers
+# historically imported these from ``airflow.utils.state`` (airflow-core); the
+# SDK definitions live in the generated API datamodels.
+from airflow.sdk.api.datamodels._generated import (
+    DagRunState as DagRunState,
+    TaskInstanceState as TaskInstanceState,
+)
+
+
+class State:
+    """Static class with task instance state constants and color methods to avoid hard-coding."""
+
+    # Backwards-compat constants for code that does not yet use the enum
+    # These first three are shared by DagState and TaskState
+    SUCCESS = TaskInstanceState.SUCCESS
+    RUNNING = TaskInstanceState.RUNNING
+    FAILED = TaskInstanceState.FAILED
+
+    # These are TaskState only
+    NONE = None
+    REMOVED = TaskInstanceState.REMOVED
+    SCHEDULED = TaskInstanceState.SCHEDULED
+    QUEUED = TaskInstanceState.QUEUED
+    RESTARTING = TaskInstanceState.RESTARTING
+    UP_FOR_RETRY = TaskInstanceState.UP_FOR_RETRY
+    UP_FOR_RESCHEDULE = TaskInstanceState.UP_FOR_RESCHEDULE
+    UPSTREAM_FAILED = TaskInstanceState.UPSTREAM_FAILED
+    SKIPPED = TaskInstanceState.SKIPPED
+    DEFERRED = TaskInstanceState.DEFERRED
+    AWAITING_INPUT = TaskInstanceState.AWAITING_INPUT
+
+    finished_dr_states: frozenset[DagRunState] = frozenset([DagRunState.SUCCESS, DagRunState.FAILED])
+    unfinished_dr_states: frozenset[DagRunState] = frozenset([DagRunState.QUEUED, DagRunState.RUNNING])
+
+    task_states: tuple[TaskInstanceState | None, ...] = (None, *TaskInstanceState)
+
+    dag_states: tuple[DagRunState, ...] = (
+        DagRunState.QUEUED,
+        DagRunState.SUCCESS,
+        DagRunState.RUNNING,
+        DagRunState.FAILED,
+    )
+
+    state_color: dict[TaskInstanceState | None, str] = {
+        None: "lightblue",
+        TaskInstanceState.QUEUED: "gray",
+        TaskInstanceState.RUNNING: "lime",
+        TaskInstanceState.SUCCESS: "green",
+        TaskInstanceState.RESTARTING: "violet",
+        TaskInstanceState.FAILED: "red",
+        TaskInstanceState.UP_FOR_RETRY: "gold",
+        TaskInstanceState.UP_FOR_RESCHEDULE: "turquoise",
+        TaskInstanceState.UPSTREAM_FAILED: "orange",
+        TaskInstanceState.SKIPPED: "hotpink",
+        TaskInstanceState.REMOVED: "lightgrey",
+        TaskInstanceState.SCHEDULED: "tan",
+        TaskInstanceState.DEFERRED: "mediumpurple",
+        TaskInstanceState.AWAITING_INPUT: "darkorange",
+    }
+
+    @classmethod
+    def color(cls, state):
+        """Return color for a state."""
+        return cls.state_color.get(state, "white")
+
+    @classmethod
+    def color_fg(cls, state):
+        """Black&white colors for a state."""
+        color = cls.color(state)
+        if color in ["green", "red"]:
+            return "white"
+        return "black"
+
+    finished: frozenset[TaskInstanceState] = frozenset(
+        [
+            TaskInstanceState.SUCCESS,
+            TaskInstanceState.FAILED,
+            TaskInstanceState.SKIPPED,
+            TaskInstanceState.UPSTREAM_FAILED,
+            TaskInstanceState.REMOVED,
+        ]
+    )
+    """
+    A list of states indicating a task has reached a terminal state (i.e. it has "finished") and needs no
+    further action.
+
+    Note that the attempt could have resulted in failure or have been
+    interrupted; or perhaps never run at all (skip, or upstream_failed) in any
+    case, it is no longer running.
+    """
+
+    unfinished: frozenset[TaskInstanceState | None] = frozenset(
+        [
+            None,
+            TaskInstanceState.SCHEDULED,
+            TaskInstanceState.QUEUED,
+            TaskInstanceState.RUNNING,
+            TaskInstanceState.RESTARTING,
+            TaskInstanceState.UP_FOR_RETRY,
+            TaskInstanceState.UP_FOR_RESCHEDULE,
+            TaskInstanceState.DEFERRED,
+            TaskInstanceState.AWAITING_INPUT,
+        ]
+    )
+    """
+    A list of states indicating that a task either has not completed
+    a run or has not even started.
+    """
+
+    failed_states: frozenset[TaskInstanceState] = frozenset(
+        [TaskInstanceState.FAILED, TaskInstanceState.UPSTREAM_FAILED]
+    )
+    """
+    A list of states indicating that a task or dag is a failed state.
+    """
+
+    success_states: frozenset[TaskInstanceState] = frozenset(
+        [TaskInstanceState.SUCCESS, TaskInstanceState.SKIPPED]
+    )
+    """
+    A list of states indicating that a task or dag is a success state.
+    """
+
+    adoptable_states = frozenset(
+        [TaskInstanceState.QUEUED, TaskInstanceState.RUNNING, TaskInstanceState.RESTARTING]
+    )
+    """
+    A list of states indicating that a task can be adopted or reset by a scheduler job
+    if it was queued by another scheduler job that is not running anymore.
+    """

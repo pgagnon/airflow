@@ -17,6 +17,7 @@
 
 from airflow.sdk.api.datamodels._generated import (
     DagRunState as DagRunState,
+    DagRunType as DagRunType,
     TaskInstanceState as TaskInstanceState,
     TriggerRule as TriggerRule,
     WeightRule as WeightRule,
@@ -128,7 +129,9 @@ from airflow.sdk.definitions.variable import Variable as Variable
 from airflow.sdk.definitions.xcom_arg import XComArg as XComArg
 from airflow.sdk.execution_time import macros as macros
 from airflow.sdk.execution_time.cache import SecretCache as SecretCache
+from airflow.sdk.helpers import merge_dicts as merge_dicts
 from airflow.sdk.io.path import ObjectStoragePath as ObjectStoragePath
+from airflow.sdk.log import LoggingMixin as LoggingMixin
 
 conf: AirflowSDKConfigParser
 
@@ -159,6 +162,7 @@ __all__ = [
     "CronPartitionTimetable",
     "DAG",
     "DagRunState",
+    "DagRunType",
     "DayWindow",
     "DeltaDataIntervalTimetable",
     "DeltaTriggerTimetable",
@@ -170,8 +174,10 @@ __all__ = [
     "HourWindow",
     "IdentityMapper",
     "Label",
+    "LoggingMixin",
     "Metadata",
     "MinimumCount",
+    "merge_dicts",
     "MonthWindow",
     "MultipleCronTriggerTimetable",
     "ObjectStoragePath",

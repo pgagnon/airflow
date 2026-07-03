@@ -38,6 +38,11 @@ if TYPE_CHECKING:
 
 from airflow.sdk._shared.secrets_masker import _secrets_masker, redact
 
+# Re-export LoggingMixin under a stable public path. Providers historically
+# imported this from ``airflow.utils.log.logging_mixin`` (airflow-core); the
+# SDK home lives in ``airflow.sdk.definitions._internal.logging_mixin``.
+from airflow.sdk.definitions._internal.logging_mixin import LoggingMixin as LoggingMixin
+
 
 class _ActiveLoggingConfig:
     """Internal class to track active logging configuration."""

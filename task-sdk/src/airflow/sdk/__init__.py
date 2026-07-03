@@ -46,6 +46,7 @@ __all__ = [
     "CronPartitionTimetable",
     "DAG",
     "DagRunState",
+    "DagRunType",
     "DayWindow",
     "DeadlineAlert",
     "DeadlineReference",
@@ -59,8 +60,10 @@ __all__ = [
     "HourWindow",
     "IdentityMapper",
     "Label",
+    "LoggingMixin",
     "Metadata",
     "MinimumCount",
+    "merge_dicts",
     "MonthWindow",
     "MultipleCronTriggerTimetable",
     "NEVER_EXPIRE",
@@ -120,7 +123,13 @@ __all__ = [
 __version__ = "1.3.0"
 
 if TYPE_CHECKING:
-    from airflow.sdk.api.datamodels._generated import DagRunState, TaskInstanceState, TriggerRule, WeightRule
+    from airflow.sdk.api.datamodels._generated import (
+        DagRunState,
+        DagRunType,
+        TaskInstanceState,
+        TriggerRule,
+        WeightRule,
+    )
     from airflow.sdk.bases.branch import BaseBranchOperator, BranchMixIn
     from airflow.sdk.bases.hook import BaseHook
     from airflow.sdk.bases.notifier import BaseNotifier
@@ -217,7 +226,9 @@ if TYPE_CHECKING:
     from airflow.sdk.definitions.xcom_arg import XComArg
     from airflow.sdk.execution_time import macros
     from airflow.sdk.execution_time.context import NEVER_EXPIRE
+    from airflow.sdk.helpers import merge_dicts
     from airflow.sdk.io.path import ObjectStoragePath
+    from airflow.sdk.log import LoggingMixin
     from airflow.sdk.types import TaskInstance
 
     conf: AirflowSDKConfigParser
@@ -249,6 +260,7 @@ __lazy_imports: dict[str, str] = {
     "CronPartitionTimetable": ".definitions.timetables.trigger",
     "DAG": ".definitions.dag",
     "DagRunState": ".api.datamodels._generated",
+    "DagRunType": ".api.datamodels._generated",
     "DayWindow": ".definitions.partition_mappers.window",
     "DeadlineAlert": ".definitions.deadline",
     "DeadlineReference": ".definitions.deadline",
@@ -262,7 +274,9 @@ __lazy_imports: dict[str, str] = {
     "HourWindow": ".definitions.partition_mappers.window",
     "IdentityMapper": ".definitions.partition_mappers.identity",
     "Label": ".definitions.edges",
+    "LoggingMixin": ".log",
     "Metadata": ".definitions.asset.metadata",
+    "merge_dicts": ".helpers",
     "MinimumCount": ".definitions.partition_mappers.wait_policy",
     "MonthWindow": ".definitions.partition_mappers.window",
     "MultipleCronTriggerTimetable": ".definitions.timetables.trigger",
