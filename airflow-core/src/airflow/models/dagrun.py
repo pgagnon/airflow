@@ -2076,6 +2076,7 @@ class DagRun(Base, LoggingMixin):
             )
             session.flush()
 
+        newly_expanded = False
         for index in range(total_length):
             if index in existing_indexes:
                 continue
@@ -2084,8 +2085,14 @@ class DagRun(Base, LoggingMixin):
             task_instance_mutation_hook(ti, dag_run=self)
             ti = session.merge(ti)
             ti.refresh_from_task(task, dag_run=self)
-            session.flush()
+            newly_expanded = True
             yield ti
+        # Flush once after the loop instead of once per new map index (N+1). autoflush is off, so this
+        # guarantees the new rows are persisted before the caller's next dependent read; the sole
+        # caller (_get_ready_tis) drives this generator to exhaustion via list-extend in one pass, with
+        # no interleaved SELECT/dependency check that relies on a per-iteration flush.
+        if newly_expanded:
+            session.flush()
 
     @classmethod
     @provide_session

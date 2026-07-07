@@ -267,7 +267,14 @@ class TaskMap(TaskInstanceDependencies):
             )
             task.log.debug("Expanding TIs upserted %s", ti)
             task_instance_mutation_hook(ti, dag_run=dr)
-            ti = session.merge(ti)
+            # These indexes are range(current_max_mapping + 1, total_length), i.e. strictly above
+            # the current DB max map_index for this (dag_id, task_id, run_id), so the rows cannot
+            # already exist. session.add() avoids the per-index existence-probe SELECT that
+            # session.merge() would issue. The concurrent-insert race a bare add() would otherwise
+            # expose is closed by the DagRun row lock: the caller runs inside _get_ready_tis, under
+            # the "SELECT ... FOR UPDATE" on the DagRun taken by get_running_dag_runs_to_examine, so
+            # only one scheduler can insert these TIs for the run at a time.
+            session.add(ti)
             ti.context_carrier = new_task_run_carrier(dr.context_carrier)
             ti.refresh_from_task(task, dag_run=dr)  # session.merge() loses task information.
             all_expanded_tis.append(ti)
