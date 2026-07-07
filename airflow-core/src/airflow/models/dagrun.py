@@ -1552,10 +1552,28 @@ class DagRun(Base, LoggingMixin):
         # If we expand TIs, we need a new list so that we iterate over them too. (We can't alter
         # `schedulable_tis` in place and have the `for` loop pick them up
         additional_tis: list[TI] = []
+        # Prefetch every unexpanded (map_index == -1) task instance of this run in a single query,
+        # keyed by task_id. MappedTaskUpstreamDep would otherwise run one SELECT per schedulable TI
+        # that has a real mapped upstream dependency (an N+1 pattern). task_id is unique at
+        # map_index == -1 within a run, so a plain dict is safe.
+        prefetched_mapped_dep_tis: dict[str, TI] = {
+            ti.task_id: ti
+            for ti in session.scalars(
+                select(TI).where(
+                    TI.dag_id == self.dag_id,
+                    TI.run_id == self.run_id,
+                    TI.map_index == -1,
+                )
+            )
+        }
         dep_context = DepContext(
             flag_upstream_failed=True,
             ignore_unmapped_tasks=True,  # Ignore this Dep, as we will expand it if we can.
             finished_tis=finished_tis,
+            prefetched_mapped_dep_tis=prefetched_mapped_dep_tis,
+            # Shared across all per-TI dependency checks in this pass so TriggerRuleDep resolves each
+            # mapped task's count at most once instead of once per schedulable task instance.
+            mapped_ti_count_cache={},
         )
 
         def _expand_mapped_task_if_needed(ti: TI) -> Iterable[TI] | None:
@@ -1614,6 +1632,10 @@ class DagRun(Base, LoggingMixin):
                 if new_tis is not None:
                     additional_tis.extend(new_tis)
                     expansion_happened = True
+                    # This task just moved from unexpanded (map_index == -1) to expanded, so its
+                    # prefetched snapshot entry is stale. Drop it; downstream mapped-dependency
+                    # checks must no longer treat it as an unexpanded dependency.
+                    prefetched_mapped_dep_tis.pop(schedulable.task_id, None)
             if new_tis is None and schedulable.state in SCHEDULEABLE_STATES:
                 # It's enough to revise map index once per task id,
                 # checking the map index for each mapped task significantly slows down scheduling
@@ -1788,12 +1810,16 @@ class DagRun(Base, LoggingMixin):
 
         """
         from airflow.models.expandinput import NotFullyPopulated
-        from airflow.serialization.definitions.mappedoperator import get_mapped_ti_count
+        from airflow.serialization.definitions.mappedoperator import get_mapped_ti_count_cached
 
         tis = self.get_task_instances(session=session)
 
         # check for removed or restored tasks
         task_ids = set()
+        # Memoize get_mapped_ti_count across this loop: for an XCom-expanded task every one of its
+        # map-index TIs re-enters the NotFullyPopulated branch below and re-resolves the same count,
+        # an N+1 scaling with fan-out width. The count is invariant across a task's map indexes.
+        mapped_ti_count_cache: dict[tuple[str, str], int | Exception] = {}
         for ti in tis:
             ti_mutation_hook(ti, dag_run=self)
             task_ids.add(ti.task_id)
@@ -1827,7 +1853,9 @@ class DagRun(Base, LoggingMixin):
             except NotFullyPopulated:
                 # What if it is _now_ dynamically mapped, but wasn't before?
                 try:
-                    total_length = get_mapped_ti_count(task, self.run_id, session=session)
+                    total_length = get_mapped_ti_count_cached(
+                        task, self.run_id, session=session, cache=mapped_ti_count_cache
+                    )
                 except NotFullyPopulated:
                     # Not all upstreams finished, so we can't tell what should be here. Remove everything.
                     if ti.map_index >= 0:

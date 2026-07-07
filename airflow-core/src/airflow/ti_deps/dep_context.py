@@ -85,6 +85,29 @@ class DepContext:
     have_changed_ti_states: bool = False
     """Have any of the TIs state's been changed as a result of evaluating dependencies"""
 
+    prefetched_mapped_dep_tis: dict[str, TaskInstance] | None = None
+    """
+    Unexpanded (``map_index == -1``) task instances of this run, keyed by ``task_id``.
+
+    Populated once per :meth:`DagRun._get_ready_tis` pass so ``MappedTaskUpstreamDep`` can look
+    up mapped-dependency task instances from memory instead of issuing one query per task instance
+    (an N+1 pattern). ``None`` means no prefetch is available and the dependency falls back to its
+    own query, so callers outside the scheduling loop keep working unchanged.
+    """
+
+    mapped_ti_count_cache: dict[tuple[str, str], int | Exception] | None = None
+    """
+    Per-pass memo for ``get_mapped_ti_count``, keyed by ``(node_id, run_id)``.
+
+    The mapped task-instance count is a pure read of *upstream* completion and stable within a
+    scheduling pass, but ``TriggerRuleDep`` re-resolves it once per schedulable task instance (an N+1
+    scaling with fan-out width). Populated once per :meth:`DagRun._get_ready_tis` pass. ``None`` means
+    no memo is available and callers resolve the count directly, so behavior outside the scheduling
+    loop is unchanged. Unlike :attr:`prefetched_mapped_dep_tis`, this is *not* invalidated when a task
+    expands mid-pass: the count derives from upstream completion, which expanding the current task does
+    not change.
+    """
+
     def ensure_finished_tis(self, dag_run: DagRun, session: Session) -> list[TaskInstance]:
         """
         Ensure finished_tis is populated if it's currently None, which allows running tasks without dag_run.

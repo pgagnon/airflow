@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -59,9 +59,9 @@ class MappedTaskUpstreamDep(BaseTIDep):
         if ti.task is None:
             return
         elif is_mapped(ti.task):
-            mapped_dependencies = ti.task.iter_mapped_dependencies()
+            mapped_dependencies = list(ti.task.iter_mapped_dependencies())
         elif (task_group := ti.task.get_closest_mapped_task_group()) is not None:
-            mapped_dependencies = task_group.iter_mapped_dependencies()
+            mapped_dependencies = list(task_group.iter_mapped_dependencies())
         else:
             return
 
@@ -69,8 +69,24 @@ class MappedTaskUpstreamDep(BaseTIDep):
         # only interested in it if it hasn't been expanded yet, i.e., we filter by map_index=-1. This is
         # because if it has been expanded, it did not fail and was not skipped outright which is all we need
         # to know for the purposes of this check.
-        mapped_dependency_tis = (
-            session.scalars(
+        #
+        # When the scheduler has prefetched the run's unexpanded (map_index == -1) task instances
+        # (DepContext.prefetched_mapped_dep_tis), read from that snapshot instead of issuing one query
+        # per task instance. The snapshot is keyed by task_id and holds every state, so the
+        # empty/non-empty distinction below is preserved exactly. Falls back to a per-TI query when no
+        # prefetch is available (e.g. are_dependencies_met called outside the scheduling loop).
+        mapped_dependency_tis: Sequence[TaskInstance]
+        if not mapped_dependencies:
+            mapped_dependency_tis = []
+        elif dep_context.prefetched_mapped_dep_tis is not None:
+            prefetched = dep_context.prefetched_mapped_dep_tis
+            mapped_dependency_tis = [
+                prefetched[operator.task_id]
+                for operator in mapped_dependencies
+                if operator.task_id in prefetched
+            ]
+        else:
+            mapped_dependency_tis = session.scalars(
                 select(TaskInstance).where(
                     TaskInstance.task_id.in_(operator.task_id for operator in mapped_dependencies),
                     TaskInstance.dag_id == ti.dag_id,
@@ -78,9 +94,6 @@ class MappedTaskUpstreamDep(BaseTIDep):
                     TaskInstance.map_index == -1,
                 )
             ).all()
-            if mapped_dependencies
-            else []
-        )
         if not mapped_dependency_tis:
             yield self._passing_status(reason="There are no (unexpanded) mapped dependencies!")
             return

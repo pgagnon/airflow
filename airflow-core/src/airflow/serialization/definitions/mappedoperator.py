@@ -501,6 +501,46 @@ def get_mapped_ti_count(task: DAGNode | TaskSDKDAGNode, run_id: str, *, session:
     raise NotImplementedError(f"Not implemented for {type(task)}")
 
 
+def get_mapped_ti_count_cached(
+    task: DAGNode | TaskSDKDAGNode,
+    run_id: str,
+    *,
+    session: Session,
+    cache: dict[tuple[str, str], int | Exception] | None,
+) -> int:
+    """
+    Memoized :func:`get_mapped_ti_count`, scoped to one scheduling pass.
+
+    ``get_mapped_ti_count`` is a pure read of *upstream* completion (XCom rows / ``TaskMap.length``)
+    and is stable within a scheduling pass, yet it is re-resolved once per map-index task instance in
+    several loops -- an N+1 that scales with fan-out width. When ``cache`` is provided (created once per
+    ``DagRun._get_ready_tis`` pass), the resolved count *and* any ``NotMapped`` / ``NotFullyPopulated``
+    outcome is memoized per ``(node_id, run_id)`` so repeat calls within the pass hit no DB.
+
+    ``cache`` of ``None`` (callers outside the scheduling loop) falls back to a direct, uncached call so
+    behavior is unchanged.
+    """
+    from airflow.models.expandinput import NotFullyPopulated
+
+    if cache is None:
+        return get_mapped_ti_count(task, run_id, session=session)
+    key = (task.node_id, run_id)
+    cached = cache.get(key)
+    if cached is not None:
+        if isinstance(cached, Exception):
+            raise cached
+        return cached
+    try:
+        result = get_mapped_ti_count(task, run_id, session=session)
+    except (NotMapped, NotFullyPopulated) as e:
+        # Cache the exception outcome too: callers branch on it, and re-raising avoids re-issuing the
+        # exists_query that produced it.
+        cache[key] = e
+        raise
+    cache[key] = result
+    return result
+
+
 # Still accept TaskSDKBaseOperator because some tests don't go through serialization.
 # TODO (GH-52141): Rewrite tests so we can drop SDK references at some point.
 @get_mapped_ti_count.register(SerializedBaseOperator)

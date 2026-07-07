@@ -2235,6 +2235,7 @@ class TaskInstance(Base, LoggingMixin, BaseWorkload):
         ti_count: int | None,
         *,
         session: Session,
+        mapped_ti_count_cache: dict[tuple[str, str], int | Exception] | None = None,
     ) -> int | range | None:
         if TYPE_CHECKING:
             assert self.task
@@ -2245,6 +2246,7 @@ class TaskInstance(Base, LoggingMixin, BaseWorkload):
             task=self.task,
             relative=upstream,
             session=session,
+            mapped_ti_count_cache=mapped_ti_count_cache,
         )
 
     def clear_db_references(self, session: Session):
@@ -2377,6 +2379,7 @@ def _get_relevant_map_indexes(
     relative: Operator,
     ti_count: int | None,
     session: Session,
+    mapped_ti_count_cache: dict[tuple[str, str], int | Exception] | None = None,
 ) -> int | range | None:
     """
     Infer the map indexes of a relative that's "relevant" to this ti.
@@ -2424,7 +2427,7 @@ def _get_relevant_map_indexes(
     :return: Specific map index or map indexes to pull, or ``None`` if we
         want to "whole" return value (i.e. no mapped task groups involved).
     """
-    from airflow.serialization.definitions.mappedoperator import get_mapped_ti_count
+    from airflow.serialization.definitions.mappedoperator import get_mapped_ti_count_cached
 
     # This value should never be None since we already know the current task
     # is in a mapped task group, and should have been expanded, despite that,
@@ -2445,7 +2448,9 @@ def _get_relevant_map_indexes(
     # should use a "partial" value. Let's break down the mapped ti count
     # between the ancestor and further expansion happened inside it.
 
-    ancestor_ti_count = get_mapped_ti_count(common_ancestor, run_id, session=session)
+    ancestor_ti_count = get_mapped_ti_count_cached(
+        common_ancestor, run_id, session=session, cache=mapped_ti_count_cache
+    )
     ancestor_map_index = map_index * ancestor_ti_count // ti_count
 
     # If the task is NOT further expanded inside the common ancestor, we

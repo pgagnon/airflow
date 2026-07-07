@@ -147,10 +147,17 @@ class TriggerRuleDep(BaseTIDep):
 
             This extra closure allows us to query the database only when needed,
             and at most once.
-            """
-            from airflow.serialization.definitions.mappedoperator import get_mapped_ti_count
 
-            return get_mapped_ti_count(task, ti.run_id, session=session)
+            The per-TI ``lru_cache`` only dedupes within one task instance's evaluation. The count is
+            invariant across all sibling expanded TIs of the task within a scheduling pass, so we also
+            consult ``dep_context.mapped_ti_count_cache`` (populated once per _get_ready_tis pass) to
+            avoid re-querying it for every one of the task's map-index TIs.
+            """
+            from airflow.serialization.definitions.mappedoperator import get_mapped_ti_count_cached
+
+            return get_mapped_ti_count_cached(
+                task, ti.run_id, session=session, cache=dep_context.mapped_ti_count_cache
+            )
 
         def _iter_expansion_dependencies(task_group: SerializedMappedTaskGroup | None) -> Iterator[str]:
             if is_mapped(task):
@@ -198,6 +205,7 @@ class TriggerRuleDep(BaseTIDep):
                 upstream=task.dag.task_dict[upstream_id],
                 ti_count=expanded_ti_count,
                 session=session,
+                mapped_ti_count_cache=dep_context.mapped_ti_count_cache,
             )
 
         def _is_relevant_upstream(upstream: TaskInstance, relevant_ids: set[str] | KeysView[str]) -> bool:
