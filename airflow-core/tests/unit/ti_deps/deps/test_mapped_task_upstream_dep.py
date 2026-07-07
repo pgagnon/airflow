@@ -470,6 +470,84 @@ def test_upstream_mapped_expanded(
     assert finished_tis_states == expected_finished_tis_states
 
 
+def test_mapped_dep_skips_query_without_real_dependencies(dag_maker, session: Session):
+    """
+    A mapped task expanded over a literal (``expand(params=[...])``) has no mapped *upstream*
+    dependency, so MappedTaskUpstreamDep must not query the DB at all.
+
+    Regression guard: ``iter_mapped_dependencies()`` returns a generator, which is always truthy.
+    Before the fix the ``if mapped_dependencies`` guard therefore ran one (empty ``IN ()``) SELECT
+    per mapped task instance regardless. Materializing it to a list makes the empty case falsy and
+    skips the query. With a fan-out of ``width`` this must be 0 SELECTs, not ``width``.
+    """
+    from airflow.providers.standard.operators.empty import EmptyOperator
+
+    from tests_common.test_utils.asserts import count_queries
+
+    width = 8
+
+    with dag_maker(session=session):
+        start = EmptyOperator(task_id="start")
+        # Literal params-expand: no upstream XCom, so mapped_dependencies is empty.
+        mapped = EmptyOperator.partial(task_id="mapped").expand(params=[{"i": i} for i in range(width)])
+        start >> mapped
+
+    dr: DagRun = dag_maker.create_dagrun()
+
+    with count_queries() as counted:
+        dr.task_instance_scheduling_decisions(session=session)
+    mapped_dep_selects = sum(n for stack, n in counted.items() if "mapped_task_upstream_dep" in stack)
+
+    assert mapped_dep_selects == 0, (
+        f"MappedTaskUpstreamDep issued {mapped_dep_selects} SELECTs for a literal-expand mapped task "
+        f"with no real dependencies; expected 0 (a fan-out of {width} would issue ~{width} without the fix)"
+    )
+
+
+def test_mapped_dep_query_is_batched_for_real_dependencies(dag_maker, session: Session):
+    """
+    When mapped tasks expand over a real upstream XCom (``m.expand(x=source())``), the scheduler
+    prefetches the run's unexpanded task instances once per _get_ready_tis pass so
+    MappedTaskUpstreamDep reads from memory instead of issuing one SELECT per task instance.
+
+    Regression guard for the N+1: with several mapped tasks sharing one upstream, a scheduling
+    decision must issue zero mapped-dep SELECTs (the single prefetch query lives in
+    DagRun._get_ready_tis, not in mapped_task_upstream_dep). Without the prefetch this scales with
+    the number of mapped tasks.
+    """
+    from airflow.sdk import task
+
+    from tests_common.test_utils.asserts import count_queries
+
+    n_mapped = 6
+
+    with dag_maker(session=session):
+
+        @task
+        def source():
+            return [1, 2, 3]
+
+        src = source()
+        for i in range(n_mapped):
+
+            @task(task_id=f"m{i}")
+            def m(x):
+                return x
+
+            m.expand(x=src)
+
+    dr: DagRun = dag_maker.create_dagrun()
+
+    with count_queries() as counted:
+        dr.task_instance_scheduling_decisions(session=session)
+    mapped_dep_selects = sum(n for stack, n in counted.items() if "mapped_task_upstream_dep" in stack)
+
+    assert mapped_dep_selects == 0, (
+        f"MappedTaskUpstreamDep issued {mapped_dep_selects} SELECTs; expected 0 with prefetch batching "
+        f"({n_mapped} mapped tasks with a real upstream would each query without it)"
+    )
+
+
 def _one_scheduling_decision_iteration(
     dr: DagRun, session: Session
 ) -> tuple[dict[str, TaskInstance], dict[str, str]]:

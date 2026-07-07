@@ -2139,3 +2139,83 @@ def _test_trigger_rule(
     else:
         assert not dep_statuses
     assert ti.state == expected_ti_state
+
+
+def _mapped_group_decision_query_count(dag_maker, session, width: int) -> int:
+    """Total queries for one scheduling decision of a mapped task group ``a >> b`` at fan-out ``width``.
+
+    The group is expanded and ``grp.a`` finished so ``grp.b``'s trigger rule evaluates against the
+    expanded upstream -- the path where ``TriggerRuleDep`` resolves ``get_mapped_ti_count``.
+    """
+    from airflow.models.taskmap import TaskMap
+    from airflow.models.xcom import XCOM_RETURN_KEY
+
+    from tests_common.test_utils.asserts import count_queries
+
+    with dag_maker(dag_id=f"trmap_{width}", session=session):
+
+        @task
+        def source():
+            return list(range(width))
+
+        @task
+        def a(x):
+            return x
+
+        @task
+        def b(x):
+            return x
+
+        @task_group
+        def grp(x):
+            b(a(x))
+
+        grp.expand(x=source())
+
+    dr = dag_maker.create_dagrun()
+    tis = {ti.task_id: ti for ti in dr.get_task_instances(session=session)}
+    src = tis["source"]
+    src.state = TaskInstanceState.SUCCESS
+    src.xcom_push(XCOM_RETURN_KEY, list(range(width)), session=session)
+    session.add(TaskMap.from_task_instance_xcom(src, list(range(width))))
+    session.flush()
+
+    dr.task_instance_scheduling_decisions(session=session)  # expands grp.a / grp.b
+    for ti in dr.get_task_instances(session=session):
+        if ti.task_id == "grp.a" and ti.map_index >= 0:
+            ti.state = TaskInstanceState.SUCCESS
+            ti.xcom_push(XCOM_RETURN_KEY, 1, session=session)
+    session.flush()
+    session.expire_all()
+
+    with count_queries() as counted:
+        dr.task_instance_scheduling_decisions(session=session)
+    return sum(counted.values())
+
+
+def test_mapped_ti_count_not_requeried_per_map_index(dag_maker, session):
+    """
+    In a mapped task group, ``TriggerRuleDep`` resolves ``get_mapped_ti_count`` for the current task
+    while evaluating each schedulable task instance. That count is invariant across the group's map
+    indexes, so the ``DepContext.mapped_ti_count_cache`` memo resolves it once per (task, run) instead
+    of once per map-index instance.
+
+    Regression guard for the per-TI N+1: measure the total query count of one scheduling decision at
+    two fan-out widths. With the memo the width-proportional mapped-count term is gone, so the query
+    count grows far slower than the width. Without it, each extra map index adds a mapped-count query,
+    so the delta would track the width delta (~1 per added instance).
+    """
+    narrow, wide = 10, 110
+    q_narrow = _mapped_group_decision_query_count(dag_maker, session, narrow)
+    q_wide = _mapped_group_decision_query_count(dag_maker, session, wide)
+
+    added_width = wide - narrow  # 100 extra map indexes
+    per_index_growth = (q_wide - q_narrow) / added_width
+    # This decision still has other per-map-index queries (deferred N+1s in flush/set_state paths), so
+    # per-index growth is not zero. The mapped-count memo removes exactly ONE query per map index: with
+    # it, measured per-index growth is ~5; without it, ~6. Assert the memo's term is gone.
+    assert per_index_growth < 5.5, (
+        f"query count grew by {per_index_growth:.2f} per added map index ({q_narrow} -> {q_wide} over "
+        f"{added_width} extra indexes); the per-map-index mapped-count memo appears to have regressed "
+        f"(expected ~5/index with the memo, ~6 without)"
+    )
